@@ -1,0 +1,140 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   v5.0 UI 规范：深色书房主题，低饱和度，正文衬线字体
+   ============================================================ */
+:root {
+  /* 背景层级 */
+  --bg-base: #0d0e14;
+  --bg-surface: #12131a;
+  --bg-elevated: #1a1d29;
+  --bg-hover: #222634;
+
+  /* 边框 */
+  --border-subtle: #222634;
+  --border-default: #2d3242;
+
+  /* 文字 */
+  --text-primary: #e7e5e0;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+
+  /* 品牌金 */
+  --accent: #c9a227;
+  --accent-soft: rgba(201, 162, 39, 0.12);
+
+  /* 状态色 */
+  --st-planned: #6b7280;
+  --st-draft: #6b7280;
+  --st-in-progress: #3b82f6;
+  --st-finalized: #22c55e;
+  --st-warning: #f59e0b;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Noto Sans SC', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 选中样式 */
+::selection {
+  background: rgba(201, 162, 39, 0.3);
+  color: #fff;
+}
+
+/* ============================================================
+   滚动条
+   ============================================================ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2d3242;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4055;
+}
+
+/* ============================================================
+   Manuscript Desk —— 纸质书排版样式（v5.0）
+   正文衬线字体，680px 宽度，行高 2.0
+   ============================================================ */
+.manuscript-text {
+  max-width: 680px;
+  margin: 0 auto;
+  font-family: 'Noto Serif SC', Georgia, serif;
+  font-size: 18px;
+  line-height: 2;
+  letter-spacing: 0.02em;
+  color: #d6d3cf;
+}
+
+.manuscript-text p {
+  margin: 0 0 1.5em 0;
+  text-indent: 2em;
+}
+
+.manuscript-text p:first-child {
+  text-indent: 2em;
+}
+
+.manuscript-text h1,
+.manuscript-text h2,
+.manuscript-text h3 {
+  font-family: 'Noto Serif SC', Georgia, serif;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: center;
+  margin: 1.5em 0 1em;
+  letter-spacing: 0.05em;
+}
+
+.manuscript-text h1 {
+  font-size: 1.5em;
+}
+
+.manuscript-text h2 {
+  font-size: 1.25em;
+}
+
+/* 稿纸氛围背景 */
+.manuscript-desk {
+  background-color: var(--bg-surface);
+  background-image: radial-gradient(circle at 50% 0%, rgba(201, 162, 39, 0.03), transparent 60%);
+}
+
+/* ============================================================
+   通用工具类
+   ============================================================ */
+.panel {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+/* 过渡动画（保持简洁） */
+.transition-panel {
+  transition: width 0.2s ease, opacity 0.2s ease;
+}
