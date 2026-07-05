@@ -53,12 +53,16 @@ class Drafter(BaseAgent):
             characters_info=characters_info,
         )
 
-        full_text = await self._llm_complete(
-            system_prompt=DRAFT_SYSTEM,
-            user_prompt=user_prompt,
-            temperature=0.8,
-            max_tokens=8192,
-        )
+        try:
+            full_text = await self._llm_complete(
+                system_prompt=DRAFT_SYSTEM,
+                user_prompt=user_prompt,
+                temperature=0.8,
+                max_tokens=8192,
+            )
+        except Exception as exc:
+            logger.warning("项目 %s Drafter LLM 失败，使用占位文本: %s", self.project_id, exc)
+            full_text = "（正文生成失败，请稍后重试）"
 
         # 将正文切分为 ManuscriptBlock
         blocks = self._split_into_blocks(full_text, chapter_id)

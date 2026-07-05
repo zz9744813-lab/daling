@@ -185,10 +185,20 @@ class PipelineOrchestrator:
             )
             blocks = await drafter.draft_chapter(plan, chapter_id=chapter.id)
 
-            # 持久化初始 blocks
+            # 持久化初始 blocks，并创建内容快照
             for block in blocks:
                 self.db.add(block)
             await self.db.flush()
+
+            # 创建 blocks 的内容快照（避免 ORM session 状态问题）
+            def _snapshot(blks):
+                """从 ORM blocks 创建简单内容列表。"""
+                return [
+                    {"content": b.content, "block_type": b.block_type, "block_no": b.block_no}
+                    for b in blks
+                ]
+
+            block_texts = _snapshot(blocks)
 
             # 3-5. Critic → (Rewriter → Critic) 循环
             critic = Critic(
@@ -205,8 +215,8 @@ class PipelineOrchestrator:
             all_issues: list[dict[str, Any]] = []
 
             for round_no in range(MAX_REWRITE_ROUNDS + 1):
-                # 3. Critic — 质量审查
-                critic_result = await critic.review(blocks, chapter_plan=plan)
+                # 3. Critic — 质量审查（传内容快照，避免 ORM 状态问题）
+                critic_result = await critic.review_texts(block_texts, chapter_plan=plan)
                 all_issues.extend(critic_result.get("issues", []))
 
                 verdict = critic_result.get("verdict", "revise")
@@ -217,7 +227,7 @@ class PipelineOrchestrator:
                     gateway=self.gateway, db=self.db,
                     project_id=self.project_id, session_id=self.session_id,
                 )
-                continuity_result = await guard.check(blocks, chapter_no)
+                continuity_result = await guard.check_texts(block_texts, chapter_no)
 
                 # 判断是否需要重写
                 needs_rewrite = (
@@ -242,18 +252,19 @@ class PipelineOrchestrator:
                     self.project_id, chapter_no, round_no + 1, score, verdict,
                 )
 
-                # 删除旧 blocks
-                await self._delete_blocks(chapter.id)
-
-                blocks = await rewriter.rewrite(
-                    blocks=blocks,
+                # 传内容快照给 Rewriter（而非 ORM 引用）
+                blocks = await rewriter.rewrite_texts(
+                    block_texts=block_texts,
                     issues=critic_result.get("issues", []),
                     plan=plan,
                     chapter_id=chapter.id,
                 )
+                # 删除旧 blocks（在 Rewriter 创建新 blocks 之后）
+                await self._delete_blocks(chapter.id)
                 for block in blocks:
                     self.db.add(block)
                 await self.db.flush()
+                block_texts = _snapshot(blocks)
 
             # 6. ChiefEditor — 最终审定
             editor = ChiefEditor(
@@ -377,7 +388,7 @@ class PipelineOrchestrator:
         stmt = select(Chapter).where(
             Chapter.project_id == self.project_id,
             Chapter.chapter_no == chapter_no,
-        )
+        ).order_by(Chapter.created_at.desc()).limit(1)
         result = await self.db.execute(stmt)
         chapter = result.scalar_one_or_none()
         if not chapter:
@@ -405,7 +416,25 @@ class PipelineOrchestrator:
         await self.db.flush()
 
     async def _get_next_chapter_no(self) -> int:
-        """获取下一章编号（当前最大章节号 + 1）。"""
+        """获取下一章编号。
+
+        优先返回第一个 word_count=0 的章节（未生成的已有章节），
+        如果所有已有章节都已生成，则返回最大章节号 + 1。
+        """
+        # 查找第一个未生成的章节（word_count=0 或 status='draft'）
+        stmt = (
+            select(Chapter.chapter_no)
+            .where(Chapter.project_id == self.project_id)
+            .where(Chapter.word_count == 0)
+            .order_by(Chapter.chapter_no.asc())
+            .limit(1)
+        )
+        result = await self.db.execute(stmt)
+        first_unfinished = result.scalar_one_or_none()
+        if first_unfinished is not None:
+            return first_unfinished
+
+        # 所有已有章节都已完成，返回下一章
         stmt = (
             select(Chapter.chapter_no)
             .where(Chapter.project_id == self.project_id)

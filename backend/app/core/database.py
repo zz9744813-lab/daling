@@ -78,13 +78,48 @@ def _build_engine():
     url = settings.DATABASE_URL
     kwargs: dict = {"echo": False, "future": True}
     if not settings.is_sqlite:
+        # PostgreSQL / MySQL: 标准连接池
         kwargs["pool_size"] = 10
         kwargs["max_overflow"] = 20
         kwargs["pool_pre_ping"] = True
     else:
-        # SQLite 需要允许跨线程共享连接（FastAPI 多线程）
-        kwargs["connect_args"] = {"check_same_thread": False}
-    return create_async_engine(url, **kwargs)
+        # SQLite: 允许跨线程 + 开启 WAL 模式解决并发锁问题
+        #
+        # WAL（Write-Ahead Logging）模式：
+        #   - 读操作不再阻塞写操作，写操作也不再阻塞读操作
+        #   - 多个连接可以同时读，写操作串行但不再锁住整个文件
+        #   - 适合"一写多读"场景（我们的 Pipeline 就是这种模式）
+        #
+        # busy_timeout=5000:
+        #   - 遇到锁时自动等待最多 5 秒再重试，而非立即报错
+        #   - 足以让正在执行的写操作完成
+        kwargs["connect_args"] = {
+            "check_same_thread": False,
+            "timeout": 30,  # 连接超时 30 秒
+        }
+    engine = create_async_engine(url, **kwargs)
+
+    # SQLite 专属：每次连接时设置 PRAGMA
+    if settings.is_sqlite:
+        from sqlalchemy import event
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, connection_record):
+            """每个新连接建立时设置 SQLite PRAGMA。
+
+            - journal_mode=WAL:  写前日志模式，允许并发读写
+            - busy_timeout=5000: 锁等待 5 秒（而非立即失败）
+            - synchronous=NORMAL: WAL 模式下的推荐同步级别
+            - foreign_keys=ON:   启用外键约束
+            """
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return engine
 
 
 engine = _build_engine()

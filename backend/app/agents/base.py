@@ -190,15 +190,17 @@ class BaseAgent:
             response: LLMResponse = await self.gateway.complete(request, provider_config)
             duration_ms = int((time.monotonic() - start_ts) * 1000)
 
+            # 处理 content 为 None 的情况（某些 API 不支持 response_format）
+            content = response.content or ""
             await self._save_agent_run(
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
-                result={"content": response.content[:2000], "model": response.model},
+                result={"content": content[:2000], "model": response.model},
                 error=None,
                 started_at=started_at,
                 duration_ms=duration_ms,
             )
-            return response.content
+            return content
 
         except Exception as exc:
             duration_ms = int((time.monotonic() - start_ts) * 1000)
@@ -221,8 +223,8 @@ class BaseAgent:
     ) -> dict:
         """调用 LLM 并解析 JSON 响应。
 
-        使用较低的 temperature（默认 0.3）以提高 JSON 输出的稳定性。
-        自动处理 markdown 代码块包裹。
+        先尝试带 response_format=json_object 调用；若 API 不支持或返回空内容，
+        则降级为不带 response_format 重试，并在 prompt 中强调 JSON 格式。
 
         Args:
             system_prompt: 系统提示词。
@@ -231,16 +233,32 @@ class BaseAgent:
 
         Returns:
             解析后的 JSON dict。
-
-        Raises:
-            json.JSONDecodeError: JSON 解析失败。
         """
+        # 第一次尝试：带 response_format
         content = await self._llm_complete(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=temperature,
             response_format={"type": "json_object"},
         )
+
+        # 如果返回空内容，降级为不带 response_format
+        if not content or not content.strip():
+            logger.warning(
+                "Agent %s response_format=json_object 返回空内容，降级重试",
+                self.agent_name,
+            )
+            json_hint = "\n\n请务必只返回合法的 JSON 对象，不要包含任何其他文字。"
+            content = await self._llm_complete(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt + json_hint,
+                temperature=temperature,
+                response_format=None,
+            )
+
+        if not content or not content.strip():
+            raise json.JSONDecodeError("LLM 返回空内容", "", 0)
+
         return parse_json_response(content)
 
     # ------------------------------------------------------------------

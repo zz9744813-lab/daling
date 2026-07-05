@@ -24,6 +24,48 @@ class Rewriter(BaseAgent):
 
     agent_name = "Rewriter"
 
+    async def rewrite_texts(
+        self,
+        block_texts: list[dict[str, Any]],
+        issues: list[dict[str, Any]],
+        plan: Optional[dict[str, Any]] = None,
+        chapter_id: Optional[uuid.UUID] = None,
+    ) -> list[ManuscriptBlock]:
+        """根据审查意见重写有问题的段落（接受内容快照）。"""
+        if not issues:
+            return []
+        manuscript_text = "\n\n".join(
+            b["content"] for b in block_texts if b.get("content")
+        )
+        issues_text = json.dumps(issues, ensure_ascii=False, indent=2)
+        plan_text = json.dumps(plan, ensure_ascii=False, indent=2) if plan else "（无计划）"
+        characters_info = await self._get_characters_info()
+
+        user_prompt = REWRITER_USER.format(
+            manuscript_text=manuscript_text,
+            issues=issues_text,
+            chapter_plan=plan_text,
+            characters_info=characters_info,
+        )
+
+        try:
+            revised_text = await self._llm_complete(
+                system_prompt=REWRITER_SYSTEM,
+                user_prompt=user_prompt,
+                temperature=0.7,
+                max_tokens=8192,
+            )
+        except Exception as exc:
+            logger.warning("项目 %s Rewriter LLM 调用失败: %s", self.project_id, exc)
+            return []
+
+        new_blocks = self._split_into_blocks(revised_text, chapter_id)
+        logger.info(
+            "项目 %s 正文修订完成: %d 个 block → %d 个 block",
+            self.project_id, len(block_texts), len(new_blocks),
+        )
+        return new_blocks
+
     async def rewrite(
         self,
         blocks: list[ManuscriptBlock],
@@ -45,8 +87,14 @@ class Rewriter(BaseAgent):
         if not issues:
             return blocks
 
-        # 准备上下文
-        manuscript_text = "\n\n".join(b.content for b in blocks if b.content)
+        # 提取内容文本（避免 ORM 状态问题）
+        try:
+            manuscript_text = "\n\n".join(b.content for b in blocks if b.content)
+        except Exception:
+            # blocks 可能已被删除，使用 block_texts
+            manuscript_text = "\n\n".join(
+                b.get("content", "") for b in blocks if isinstance(b, dict) and b.get("content")
+            )
         issues_text = json.dumps(issues, ensure_ascii=False, indent=2)
         plan_text = json.dumps(plan, ensure_ascii=False, indent=2) if plan else "（无计划）"
         characters_info = await self._get_characters_info()

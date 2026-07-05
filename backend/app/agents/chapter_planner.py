@@ -62,11 +62,15 @@ class ChapterPlanner(BaseAgent):
             foreshadows=foreshadows,
         )
 
-        plan = await self._llm_json(
-            system_prompt=CHAPTER_PLAN_SYSTEM,
-            user_prompt=user_prompt,
-            temperature=0.6,
-        )
+        try:
+            plan = await self._llm_json(
+                system_prompt=CHAPTER_PLAN_SYSTEM,
+                user_prompt=user_prompt,
+                temperature=0.6,
+            )
+        except Exception as exc:
+            logger.warning("项目 %s ChapterPlanner LLM 失败，使用默认计划: %s", self.project_id, exc)
+            plan = {}
 
         # 确保关键字段存在
         plan.setdefault("chapter_no", chapter_no)

@@ -27,23 +27,15 @@ class ContinuityGuard(BaseAgent):
 
     agent_name = "ContinuityGuard"
 
-    async def check(
+    async def check_texts(
         self,
-        blocks: list[ManuscriptBlock],
+        block_texts: list[dict[str, Any]],
         chapter_no: int,
     ) -> dict[str, Any]:
-        """对章节正文进行一致性校验。
-
-        基础检查：角色名一致性、地点一致性、时间线合理性、设定一致性。
-
-        Args:
-            blocks: ManuscriptBlock 列表。
-            chapter_no: 章节编号。
-
-        Returns:
-            校验结果 dict，包含 passed, conflicts, warnings。
-        """
-        manuscript_text = "\n\n".join(b.content for b in blocks if b.content)
+        """对章节正文进行一致性校验（接受内容快照）。"""
+        manuscript_text = "\n\n".join(
+            b["content"] for b in block_texts if b.get("content")
+        )
         world_summary = await self._get_world_summary()
         previous_summaries = await self._get_previous_summaries(chapter_no)
         characters_info = await self._get_characters_info()
@@ -58,18 +50,23 @@ class ContinuityGuard(BaseAgent):
             foreshadows=foreshadows,
         )
 
-        result = await self._llm_json(
-            system_prompt=CONTINUITY_SYSTEM,
-            user_prompt=user_prompt,
-            temperature=0.2,
-        )
+        try:
+            result = await self._llm_json(
+                system_prompt=CONTINUITY_SYSTEM,
+                user_prompt=user_prompt,
+                temperature=0.2,
+            )
+        except Exception as exc:
+            logger.warning(
+                "项目 %s ContinuityGuard LLM 调用失败，使用默认结果: %s",
+                self.project_id, exc,
+            )
+            result = {}
 
-        # 确保关键字段存在
         result.setdefault("passed", True)
         result.setdefault("conflicts", [])
         result.setdefault("warnings", [])
 
-        # 如果有 conflict，passed 必须为 False
         if result["conflicts"]:
             result["passed"] = False
 
@@ -79,6 +76,18 @@ class ContinuityGuard(BaseAgent):
             len(result["conflicts"]), len(result["warnings"]),
         )
         return result
+
+    async def check(
+        self,
+        blocks: list[ManuscriptBlock],
+        chapter_no: int,
+    ) -> dict[str, Any]:
+        """对章节正文进行一致性校验（接受 ORM ManuscriptBlock）。"""
+        block_texts = [
+            {"content": b.content, "block_type": b.block_type, "block_no": b.block_no}
+            for b in blocks
+        ]
+        return await self.check_texts(block_texts, chapter_no)
 
     # ------------------------------------------------------------------
     # 辅助查询
