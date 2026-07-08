@@ -61,14 +61,19 @@ class OpenAICompatibleProvider(BaseProvider):
     def _build_payload(self, request: LLMRequest, stream: bool = False) -> dict:
         """构造请求体。"""
         model = request.model or self.default_model
+        max_tokens = request.max_tokens
+        # 推理模型需要更大的 token 预算
+        if request.is_reasoning_model:
+            max_tokens = max(max_tokens, 8192)
         payload: dict = {
             "model": model,
             "messages": [{"role": m.role, "content": m.content} for m in request.messages],
             "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens,
             "stream": stream,
         }
-        if request.response_format:
+        # 推理模型不传 response_format（部分推理模型不支持会导致返回空）
+        if request.response_format and not request.is_reasoning_model:
             payload["response_format"] = request.response_format
         if request.stop:
             payload["stop"] = request.stop
@@ -153,16 +158,42 @@ class OpenAICompatibleProvider(BaseProvider):
 
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
-        content = message.get("content", "")
+        content = message.get("content") or ""
+        reasoning_content = (
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or ""
+        )
         finish_reason = choice.get("finish_reason", "stop")
 
         usage = data.get("usage", {})
         input_tokens = usage.get("prompt_tokens") or estimate_messages_tokens(request.messages)
-        output_tokens = usage.get("completion_tokens") or estimate_tokens(content)
+        output_tokens = (
+            usage.get("completion_tokens")
+            or estimate_tokens(content or reasoning_content)
+        )
         used_model = data.get("model", model)
+
+        if request.is_reasoning_model:
+            logger.info(
+                "推理模型响应: content=%d 字符, reasoning=%d 字符, model=%s, finish=%s",
+                len(content), len(reasoning_content), used_model, finish_reason,
+            )
+        elif not content and reasoning_content:
+            # 兼容：普通调用但 content 为空、reasoning 有内容
+            logger.info(
+                "content 为空，从 reasoning 提取 (%d 字符), model=%s, finish=%s",
+                len(reasoning_content), used_model, finish_reason,
+            )
+        else:
+            logger.info(
+                "API content 正常 (%d 字符), model=%s, finish=%s",
+                len(content), used_model, finish_reason,
+            )
 
         return LLMResponse(
             content=content,
+            reasoning_content=reasoning_content,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model=used_model,

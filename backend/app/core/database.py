@@ -166,21 +166,23 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         # SQLite ALTER TABLE 添加新列（如果不存在），幂等执行。
         # create_all 不会为已存在的表添加列，故手动迁移。
-        try:
-            await conn.execute(
-                text("ALTER TABLE model_bindings ADD COLUMN agent_role VARCHAR(50)")
-            )
-        except Exception:
-            pass  # 列已存在
-        try:
-            await conn.execute(
-                text(
-                    "ALTER TABLE model_bindings ADD COLUMN project_id CHAR(36) "
-                    "REFERENCES projects(id) ON DELETE CASCADE"
+        # 注意：仅在 SQLite 下执行，PostgreSQL 的 create_all 已包含完整列定义
+        if settings.is_sqlite:
+            try:
+                await conn.execute(
+                    text("ALTER TABLE model_bindings ADD COLUMN agent_role VARCHAR(50)")
                 )
-            )
-        except Exception:
-            pass  # 列已存在
+            except Exception:
+                pass  # 列已存在
+            try:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE model_bindings ADD COLUMN project_id CHAR(36) "
+                        "REFERENCES projects(id) ON DELETE CASCADE"
+                    )
+                )
+            except Exception:
+                pass  # 列已存在
 
 
 async def dispose_db() -> Optional[Exception]:

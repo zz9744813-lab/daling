@@ -23,6 +23,16 @@ from app.model_gateway import Gateway, LLMMessage, LLMRequest, LLMResponse
 
 logger = logging.getLogger("app.agents.base")
 
+# ---------------------------------------------------------------------------
+# Prompt 约定：要求推理模型先自由思考，再用标记输出 JSON
+# ---------------------------------------------------------------------------
+JSON_OUTPUT_CONTRACT = """
+先自由思考，思考过程不限格式，不要用 JSON。
+思考结束后，另起一行，只写这个标记：
+===FINAL_JSON===
+标记后紧跟且只包含合法 JSON，不要有任何解释、前言、代码块符号。
+"""
+
 
 def strip_json_markdown(text: str) -> str:
     """去除 LLM 返回中可能包裹的 markdown 代码块标记。
@@ -38,8 +48,46 @@ def strip_json_markdown(text: str) -> str:
     return text
 
 
+def extract_json_block(text: str) -> Optional[str]:
+    """括号配对提取第一个完整 JSON 对象/数组，不依赖正则。
+
+    Args:
+        text: 原始文本。
+
+    Returns:
+        提取到的 JSON 字符串，找不到返回 None。
+    """
+    text = strip_json_markdown(text)
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        start = text.find(open_ch)
+        if start == -1:
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+    return None
+
+
 def parse_json_response(text: str) -> dict:
-    """解析 LLM 返回的 JSON 文本，处理 markdown 包裹。
+    """解析 LLM 返回的 JSON 文本，处理 markdown 包裹与括号配对。
 
     Args:
         text: LLM 返回的原始文本。
@@ -51,7 +99,25 @@ def parse_json_response(text: str) -> dict:
         json.JSONDecodeError: JSON 解析失败。
     """
     cleaned = strip_json_markdown(text)
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        block = extract_json_block(cleaned)
+        if block is None:
+            raise
+        return json.loads(block)
+
+
+def extract_after_marker(text: str, marker: str = "===FINAL_JSON===") -> str:
+    """提取标记之后的内容。
+
+    推理模型被要求在思考后用 ``===FINAL_JSON===`` 标记输出 JSON。
+    如果找到标记，返回标记后的文本；否则返回原文（兜底）。
+    """
+    idx = text.find(marker)
+    if idx == -1:
+        return text
+    return text[idx + len(marker):].strip()
 
 
 class BaseAgent:
@@ -123,6 +189,7 @@ class BaseAgent:
                         "base_url": provider.base_url or "",
                         "api_key": provider.api_key_enc or "",
                         "model": binding.model_name,
+                        "capabilities": binding.capabilities or {},
                     }
         except Exception:
             logger.exception(
@@ -151,15 +218,23 @@ class BaseAgent:
     # ------------------------------------------------------------------
     # LLM 调用
     # ------------------------------------------------------------------
-    async def _llm_complete(
+    async def _get_is_reasoning(self) -> bool:
+        """从 provider_config 中读取 capabilities.is_reasoning 标记。"""
+        provider_config = await self._get_provider_config()
+        if provider_config is None:
+            return False
+        return bool((provider_config.get("capabilities") or {}).get("is_reasoning"))
+
+    async def _llm_complete_raw(
         self,
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: Optional[dict] = None,
-    ) -> str:
-        """调用 LLM 并记录 AgentRun。
+        is_reasoning_model: bool = False,
+    ) -> LLMResponse:
+        """调用 LLM 并记录 AgentRun，返回完整 LLMResponse。
 
         Args:
             system_prompt: 系统提示词。
@@ -167,9 +242,10 @@ class BaseAgent:
             temperature: 采样温度。
             max_tokens: 最大生成 token 数。
             response_format: 响应格式（如 ``{"type": "json_object"}``）。
+            is_reasoning_model: 是否为推理模型，控制 payload 构造方式。
 
         Returns:
-            LLM 生成的文本内容。
+            LLMResponse 响应结果。
         """
         messages = [
             LLMMessage(role="system", content=system_prompt),
@@ -180,6 +256,7 @@ class BaseAgent:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
+            is_reasoning_model=is_reasoning_model,
         )
 
         provider_config = await self._get_provider_config()
@@ -187,20 +264,20 @@ class BaseAgent:
         start_ts = time.monotonic()
 
         try:
-            response: LLMResponse = await self.gateway.complete(request, provider_config)
+            response = await self.gateway.complete(request, provider_config)
             duration_ms = int((time.monotonic() - start_ts) * 1000)
-
-            # 处理 content 为 None 的情况（某些 API 不支持 response_format）
-            content = response.content or ""
             await self._save_agent_run(
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
-                result={"content": content[:2000], "model": response.model},
+                result={
+                    "content": (response.content or "")[:2000],
+                    "model": response.model,
+                },
                 error=None,
                 started_at=started_at,
                 duration_ms=duration_ms,
             )
-            return content
+            return response
 
         except Exception as exc:
             duration_ms = int((time.monotonic() - start_ts) * 1000)
@@ -215,51 +292,102 @@ class BaseAgent:
             )
             raise
 
+    async def _llm_complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        response_format: Optional[dict] = None,
+    ) -> str:
+        """调用 LLM 并返回 content 文本（向后兼容）。
+
+        对推理模型自动合并 content + reasoning_content。
+        """
+        is_reasoning = await self._get_is_reasoning()
+        response = await self._llm_complete_raw(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            is_reasoning_model=is_reasoning,
+        )
+        content = response.content or ""
+        if not content and response.reasoning_content:
+            content = response.reasoning_content
+        return content
+
     async def _llm_json(
         self,
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.3,
+        is_reasoning_model: Optional[bool] = None,
     ) -> dict:
-        """调用 LLM 并解析 JSON 响应。
+        """调用 LLM 并解析 JSON 响应，兼容推理模型和普通模型。
 
-        先尝试带 response_format=json_object 调用；若 API 不支持或返回空内容，
-        则降级为不带 response_format 重试，并在 prompt 中强调 JSON 格式。
+        对推理模型：
+        - system_prompt 末尾追加 JSON_OUTPUT_CONTRACT（先思考再输出 JSON）
+        - 不传 response_format（部分推理模型不支持会返回空）
+        - 同时尝试 content 和 reasoning_content 两个字段
+
+        对普通模型：
+        - 传 response_format={"type": "json_object"}
+        - 读取 content 字段
+
+        JSON 解析策略（多级降级）：
+        1. 先尝试标记后内容 (===FINAL_JSON===)
+        2. 再尝试整段文本
+        3. 先 json.loads，失败再用括号配对 extract_json_block
 
         Args:
             system_prompt: 系统提示词。
             user_prompt: 用户提示词。
-            temperature: 采样温度（默认 0.3，适合结构化输出）。
+            temperature: 采样温度（默认 0.3）。
+            is_reasoning_model: 显式指定是否推理模型，None 则自动读取 capabilities。
 
         Returns:
             解析后的 JSON dict。
+
+        Raises:
+            json.JSONDecodeError: 所有候选字段均无法解析出 JSON。
         """
-        # 第一次尝试：带 response_format
-        content = await self._llm_complete(
-            system_prompt=system_prompt,
+        if is_reasoning_model is None:
+            is_reasoning_model = await self._get_is_reasoning()
+
+        full_system = system_prompt
+        if is_reasoning_model:
+            full_system = system_prompt + JSON_OUTPUT_CONTRACT
+
+        response = await self._llm_complete_raw(
+            system_prompt=full_system,
             user_prompt=user_prompt,
             temperature=temperature,
-            response_format={"type": "json_object"},
+            response_format=None if is_reasoning_model else {"type": "json_object"},
+            is_reasoning_model=is_reasoning_model,
         )
 
-        # 如果返回空内容，降级为不带 response_format
-        if not content or not content.strip():
-            logger.warning(
-                "Agent %s response_format=json_object 返回空内容，降级重试",
-                self.agent_name,
-            )
-            json_hint = "\n\n请务必只返回合法的 JSON 对象，不要包含任何其他文字。"
-            content = await self._llm_complete(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt + json_hint,
-                temperature=temperature,
-                response_format=None,
-            )
+        # 收集候选文本：content 和 reasoning_content，各试"标记后"和"整段"
+        candidates: list[str] = []
+        for raw in (response.content, response.reasoning_content):
+            if raw and raw.strip():
+                candidates.append(extract_after_marker(raw))
+                candidates.append(raw)
 
-        if not content or not content.strip():
-            raise json.JSONDecodeError("LLM 返回空内容", "", 0)
+        last_err: Optional[Exception] = None
+        for candidate in candidates:
+            try:
+                return parse_json_response(candidate)
+            except json.JSONDecodeError as exc:
+                last_err = exc
+                continue
 
-        return parse_json_response(content)
+        logger.error(
+            "Agent %s 所有候选字段均无法解析出 JSON (candidates=%d, is_reasoning=%s)",
+            self.agent_name, len(candidates), is_reasoning_model,
+        )
+        raise last_err or json.JSONDecodeError("LLM 返回空内容", "", 0)
 
     # ------------------------------------------------------------------
     # AgentRun 记录

@@ -18,11 +18,12 @@ import {
   Wifi,
   WifiOff,
   AlertTriangle,
+  Zap,
 } from 'lucide-react'
 import { TopBar } from '../layout/TopBar'
 import { BossCommandBar } from '../layout/BossCommandBar'
 import { AppShell, AppShellBody } from '../layout/AppShell'
-import { cockpitApi, pipelineApi, brainApi, canonFactsApi, reviewQueueApi } from '../api/client'
+import { cockpitApi, pipelineApi, brainApi, canonFactsApi, reviewQueueApi, continuousApi } from '../api/client'
 import { useProjectStore } from '../store/projectStore'
 import { useCockpitStream } from '../hooks/useCockpitStream'
 import { cn } from '../lib/cn'
@@ -55,6 +56,7 @@ export default function CockpitPage() {
 
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(false)
+  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null)
 
   // ===== 创作舱概览数据 =====
   const { data: cockpit, refetch: refetchCockpit } = useQuery({
@@ -64,6 +66,14 @@ export default function CockpitPage() {
     refetchInterval: 15000,
   })
 
+  // ===== 检查是否上传了大纲 =====
+  const { data: outlineInfo } = useQuery({
+    queryKey: ['outline-info', projectId],
+    queryFn: () => projectsApi.getOutline(projectId),
+    enabled: !!projectId,
+  })
+  const hasUploadedOutline = (outlineInfo?.char_count ?? 0) > 0
+
   // ===== 章节列表（左侧 Dock 底部 + Context Lens） =====
   const { data: chapters } = useQuery({
     queryKey: ['chapters', projectId],
@@ -72,8 +82,10 @@ export default function CockpitPage() {
   })
 
   const currentChapter =
-    cockpit?.current_chapter ??
+    chapters?.find((c) => c.id === selectedChapterId) ??
+    chapters?.find((c) => (c.word_count ?? 0) > 0) ??
     chapters?.find((c) => c.status === 'in_progress') ??
+    cockpit?.current_chapter ??
     chapters?.[0] ??
     null
 
@@ -118,40 +130,117 @@ export default function CockpitPage() {
       refetchCockpit()
       queryClient.invalidateQueries({ queryKey: ['chapters', projectId] })
     },
+    onError: (err: Error) => {
+      console.error('Bible failed:', err)
+      alert(`生成世界观失败: ${err.message}`)
+    },
   })
 
   const outlineMutation = useMutation({
     mutationFn: () =>
       pipelineApi.generateOutline(projectId, {
         volume_count: 3,
-        chapters_per_volume: Math.ceil(
-          (project?.target_chapters ?? project?.config?.target_chapters ?? 20) / 3,
-        ),
+        chapters_per_volume: 10,
       }),
     onSuccess: () => {
       refetchCockpit()
       queryClient.invalidateQueries({ queryKey: ['chapters', projectId] })
     },
+    onError: (err: Error) => {
+      console.error('Outline failed:', err)
+      alert(`生成大纲失败: ${err.message}`)
+    },
   })
 
+  const [runStatus, setRunStatus] = useState<string>('')
+
   const runMutation = useMutation({
-    mutationFn: () =>
-      pipelineApi.run(projectId, {
-        target_chapters: project?.target_chapters ?? project?.config?.target_chapters ?? 1,
+    mutationFn: async () => {
+      // 如果没有章节，先自动生成大纲
+      if (!chapters || chapters.length === 0) {
+        setRunStatus(hasUploadedOutline ? '正在解析大纲...' : '正在生成大纲...')
+        await pipelineApi.generateOutline(projectId, {
+          volume_count: 3,
+          chapters_per_volume: 10,
+        })
+        await queryClient.invalidateQueries({ queryKey: ['chapters', projectId] })
+      }
+      setRunStatus('正在生成正文，预计需要 3-5 分钟，请耐心等待...')
+      return pipelineApi.run(projectId, {
+        target_chapters: 1,
         mode: 'auto',
-      }),
-    onSuccess: () => refetchCockpit(),
+      })
+    },
+    onMutate: () => {
+      if (chapters && chapters.length > 0) {
+        setRunStatus('正在生成正文，预计需要 3-5 分钟，请耐心等待...')
+      }
+    },
+    onSuccess: (data: any) => {
+      const result = data?.result || {}
+      const chapters = result.chapters || []
+      const ch = chapters[0] || {}
+      if (ch.status === 'approved' || ch.status === 'review') {
+        setRunStatus(`✅ 第 ${ch.chapter_no} 章生成完成！状态: ${ch.status}，评分: ${ch.score}`)
+      } else if (ch.status === 'failed') {
+        setRunStatus(`❌ 第 ${ch.chapter_no} 章生成失败: ${ch.error || '未知错误'}`)
+      } else {
+        setRunStatus(`第 ${ch.chapter_no} 章处理完成，状态: ${ch.status}`)
+      }
+      refetchCockpit()
+    },
+    onError: (err: Error) => {
+      console.error('Pipeline run failed:', err)
+      setRunStatus(`❌ 写作失败: ${err.message}`)
+    },
   })
 
   const resumeMutation = useMutation({
     mutationFn: () => pipelineApi.resumeSession(projectId),
     onSuccess: () => refetchCockpit(),
+    onError: (err: Error) => {
+      console.error('Resume failed:', err)
+      alert(`恢复失败: ${err.message}`)
+    },
   })
 
   const takeoverMutation = useMutation({
     mutationFn: () => cockpitApi.takeover(projectId),
     onSuccess: () => refetchCockpit(),
+    onError: (err: Error) => {
+      console.error('Takeover failed:', err)
+      alert(`接管失败: ${err.message}`)
+    },
   })
+
+  // ===== 连续写作（24 小时不间断后台写作） =====
+  // 每 5 秒轮询连续写作状态
+  const { data: continuousStatus, refetch: refetchContinuous } = useQuery({
+    queryKey: ['continuous-status', projectId],
+    queryFn: () => continuousApi.status(projectId),
+    enabled: !!projectId,
+    refetchInterval: 5000,
+  })
+
+  const continuousStartMutation = useMutation({
+    mutationFn: () => continuousApi.start(projectId),
+    onSuccess: () => refetchContinuous(),
+    onError: (err: Error) => {
+      console.error('Continuous start failed:', err)
+      alert(`启动连续写作失败: ${err.message}`)
+    },
+  })
+
+  const continuousStopMutation = useMutation({
+    mutationFn: () => continuousApi.stop(projectId),
+    onSuccess: () => refetchContinuous(),
+    onError: (err: Error) => {
+      console.error('Continuous stop failed:', err)
+      alert(`停止连续写作失败: ${err.message}`)
+    },
+  })
+
+  const continuousRunning = continuousStatus?.running ?? false
 
   // ===== 合并 Agent 状态（SSE 实时 + 初始数据） =====
   const mergedAgentStatuses = useMemo(() => {
@@ -204,6 +293,7 @@ export default function CockpitPage() {
           connected={stream.connected}
           chapters={chapters}
           currentChapterId={currentChapter?.id}
+          onSelectChapter={(id) => setSelectedChapterId(id)}
         />
 
         {/* ============ Manuscript Desk —— 稿件主角 ============ */}
@@ -218,7 +308,7 @@ export default function CockpitPage() {
             />
             <ToolbarButton
               icon={<ListTree size={13} />}
-              label="生成大纲"
+              label={hasUploadedOutline ? '解析大纲' : '生成大纲'}
               onClick={() => outlineMutation.mutate()}
               loading={outlineMutation.isPending}
             />
@@ -229,6 +319,28 @@ export default function CockpitPage() {
               loading={runMutation.isPending}
               variant="primary"
             />
+            {/* 连续写作按钮：未运行时"启动连续写作"，运行中"停止连续写作"（红色） */}
+            <ToolbarButton
+              icon={<Zap size={13} />}
+              label={continuousRunning ? '停止连续写作' : '启动连续写作'}
+              onClick={() =>
+                continuousRunning
+                  ? continuousStopMutation.mutate()
+                  : continuousStartMutation.mutate()
+              }
+              loading={
+                continuousStartMutation.isPending ||
+                continuousStopMutation.isPending
+              }
+              variant={continuousRunning ? 'danger' : 'ghost'}
+            />
+            {continuousRunning && (
+              <span className="flex items-center gap-1 text-xs text-blue-400">
+                <Loader2 size={11} className="animate-spin" />
+                连续写作中：第 {continuousStatus?.current_chapter ?? '—'} 章 · 已完成{' '}
+                {continuousStatus?.completed_chapters ?? 0} 章
+              </span>
+            )}
             <ToolbarButton
               icon={<RotateCcw size={13} />}
               label="恢复"
@@ -243,7 +355,13 @@ export default function CockpitPage() {
             />
 
             <div className="ml-auto flex items-center gap-2 text-xs text-gray-500">
-              {anyWorking && (
+              {runStatus && (
+                <span className={`flex items-center gap-1 ${runStatus.startsWith('❌') ? 'text-red-400' : runStatus.startsWith('✅') ? 'text-green-400' : 'text-blue-400'}`}>
+                  {runMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+                  {runStatus}
+                </span>
+              )}
+              {anyWorking && !runStatus && (
                 <span className="flex items-center gap-1 text-blue-400">
                   <Loader2 size={12} className="animate-spin" />
                   智能体工作中…
@@ -377,7 +495,7 @@ function ToolbarButton({
   label: string
   onClick: () => void
   loading?: boolean
-  variant?: 'ghost' | 'primary'
+  variant?: 'ghost' | 'primary' | 'danger'
 }) {
   return (
     <button
@@ -387,7 +505,9 @@ function ToolbarButton({
         'flex h-7 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors',
         variant === 'primary'
           ? 'bg-gold-500 text-ink-950 hover:bg-gold-400'
-          : 'text-gray-300 hover:bg-ink-700',
+          : variant === 'danger'
+            ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30'
+            : 'text-gray-300 hover:bg-ink-700',
         'disabled:cursor-not-allowed disabled:opacity-40',
       )}
     >
@@ -407,6 +527,7 @@ function AgentDock({
   connected,
   chapters,
   currentChapterId,
+  onSelectChapter,
 }: {
   open: boolean
   onToggle: () => void
@@ -414,6 +535,7 @@ function AgentDock({
   connected: boolean
   chapters?: Chapter[]
   currentChapterId?: string
+  onSelectChapter?: (chapterId: string) => void
 }) {
   return (
     <aside
@@ -455,6 +577,7 @@ function AgentDock({
               chapters.map((c) => (
                 <button
                   key={c.id}
+                  onClick={() => onSelectChapter?.(c.id)}
                   className={cn(
                     'flex w-full items-center gap-2 px-3 py-1 text-left text-sm transition-colors',
                     c.id === currentChapterId

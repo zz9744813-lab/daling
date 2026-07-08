@@ -11,6 +11,7 @@ from app.api.routes_provider import router as provider_router
 from app.api.routes_review_queue import router as review_queue_router
 from app.api.routes_storyline import router as storyline_router
 from app.api.routes_usage import router as usage_router
+from app.api.continuous import router as continuous_router
 
 __all__ = [
     "projects_router",
@@ -25,4 +26,5 @@ __all__ = [
     "canon_router",
     "book_memory_router",
     "planning_router",
+    "continuous_router",
 ]

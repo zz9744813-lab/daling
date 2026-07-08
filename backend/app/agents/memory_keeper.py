@@ -30,7 +30,7 @@ class MemoryKeeper(BaseAgent):
     async def update_state(
         self,
         chapter_id: uuid.UUID,
-        blocks: list[ManuscriptBlock],
+        blocks: list[ManuscriptBlock] | list[dict[str, Any]],
     ) -> dict[str, Any]:
         """章节完成后更新所有状态。
 
@@ -42,7 +42,7 @@ class MemoryKeeper(BaseAgent):
 
         Args:
             chapter_id: 章节 ID。
-            blocks: 章节 ManuscriptBlock 列表。
+            blocks: 章节 ManuscriptBlock 列表或内容快照 dict 列表。
 
         Returns:
             更新结果摘要 dict。
@@ -53,7 +53,17 @@ class MemoryKeeper(BaseAgent):
             return {"error": "章节不存在"}
 
         chapter_no = chapter.chapter_no
-        manuscript_text = "\n\n".join(b.content for b in blocks if b.content)
+        # 兼容 ORM 对象和 dict 快照
+        if blocks and isinstance(blocks[0], dict):
+            manuscript_text = "\n\n".join(
+                b.get("content", "") for b in blocks if b.get("content")
+            )
+        else:
+            manuscript_text = "\n\n".join(b.content for b in blocks if b.content)
+
+        # 更新章节 word_count
+        word_count = len(manuscript_text.replace("\n", "").replace(" ", ""))
+        chapter.word_count = word_count
 
         # 1. 调用 LLM 生成结构化摘要
         characters_info = await self._get_characters_info()
@@ -66,11 +76,15 @@ class MemoryKeeper(BaseAgent):
             known_facts=known_facts,
         )
 
-        summary_result = await self._llm_json(
-            system_prompt=SUMMARY_SYSTEM,
-            user_prompt=user_prompt,
-            temperature=0.3,
-        )
+        try:
+            summary_result = await self._llm_json(
+                system_prompt=SUMMARY_SYSTEM,
+                user_prompt=user_prompt,
+                temperature=0.3,
+            )
+        except Exception as exc:
+            logger.warning("项目 %s MemoryKeeper LLM 失败: %s", self.project_id, exc)
+            summary_result = {}
 
         # 2. 保存 ChapterSummary
         chapter_summary = ChapterSummary(

@@ -8,15 +8,19 @@
 """
 from __future__ import annotations
 
+import io
+import logging
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.db.repositories.project import ProjectRepository
+
+logger = logging.getLogger("app.api.routes_projects")
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -41,6 +45,7 @@ class ProjectCreate(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     type: Optional[str] = None  # 前端 Project.type
+    config: Optional[dict[str, Any]] = None  # 前端传入的完整 config dict
 
 
 class ProjectOut(BaseModel):
@@ -79,6 +84,10 @@ def _build_config(extra: dict[str, Any]) -> dict[str, Any]:
         "language",
         "genre",
         "tone",
+        "length_type",
+        "length_label",
+        "chapter_range",
+        "estimated_words",
     ):
         if key in extra and extra[key] is not None:
             config[key] = extra[key]
@@ -143,6 +152,13 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
     if payload.type is not None:
         extra["type"] = payload.type
 
+    # 前端传入的 config dict 中的所有字段也存入 extra
+    # （包含 length_type / chapter_range / themes 等新字段）
+    if payload.config:
+        for k, v in payload.config.items():
+            if v is not None:
+                extra[k] = v
+
     # description 与 synopsis 同义，优先用 synopsis
     synopsis = payload.synopsis if payload.synopsis is not None else payload.description
 
@@ -165,3 +181,192 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     if obj is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return _to_out(obj)
+
+
+# ------------------------------------------------------------------
+# 上传大纲文件
+# ------------------------------------------------------------------
+
+def _extract_text_from_docx(content: bytes) -> str:
+    """从 docx 文件字节中提取纯文本。"""
+    import docx
+
+    doc = docx.Document(io.BytesIO(content))
+    paragraphs = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def _extract_text_from_file(filename: str, content: bytes) -> str:
+    """根据文件扩展名提取文本内容。
+
+    支持 .docx / .txt / .md
+    """
+    lower = filename.lower()
+    if lower.endswith(".docx"):
+        return _extract_text_from_docx(content)
+    elif lower.endswith((".txt", ".md", ".markdown")):
+        # 尝试 UTF-8，回退 GBK
+        try:
+            return content.decode("utf-8")
+        except UnicodeDecodeError:
+            return content.decode("gbk", errors="replace")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="不支持的文件格式，请上传 .docx / .txt / .md 文件",
+        )
+
+
+@router.post("/{project_id}/upload-outline")
+async def upload_outline(
+    project_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """上传详细大纲文件（.docx / .txt / .md）。
+
+    文件内容会被提取为纯文本，存储在 Project.extra["outline_text"] 中。
+    生成世界观圣经时会自动读取并传给 StoryArchitect 作为参考。
+    """
+    repo = ProjectRepository(db)
+    project = await repo.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:  # 5MB 限制
+        raise HTTPException(status_code=413, detail="文件过大，请上传 5MB 以下的文件")
+
+    text = _extract_text_from_file(file.filename or "outline.txt", content)
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="文件内容为空")
+
+    # 存入 extra dict
+    # 注意：SQLAlchemy JSON 字段需要显式标记为已修改
+    from sqlalchemy.orm.attributes import flag_modified
+
+    extra = project.extra or {}
+    extra["outline_text"] = text
+    extra["outline_filename"] = file.filename
+    project.extra = extra
+    flag_modified(project, "extra")
+    await db.commit()
+
+    logger.info(
+        "项目 %s 上传大纲: %s (%d 字符)",
+        project_id, file.filename, len(text),
+    )
+
+    return {
+        "ok": True,
+        "project_id": str(project_id),
+        "filename": file.filename,
+        "char_count": len(text),
+        "preview": text[:500],
+    }
+
+
+@router.get("/{project_id}/outline")
+async def get_outline(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """获取项目已上传的大纲文本。"""
+    repo = ProjectRepository(db)
+    project = await repo.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    extra = project.extra or {}
+    text = extra.get("outline_text", "")
+    return {
+        "project_id": str(project_id),
+        "filename": extra.get("outline_filename"),
+        "char_count": len(text),
+        "text": text,
+    }
+
+
+@router.delete("/{project_id}/outline")
+async def delete_outline(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """删除项目已上传的大纲。"""
+    repo = ProjectRepository(db)
+    project = await repo.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    extra = project.extra or {}
+    extra.pop("outline_text", None)
+    extra.pop("outline_filename", None)
+    project.extra = extra
+    flag_modified(project, "extra")
+    await db.commit()
+
+    return {"ok": True, "project_id": str(project_id)}
+
+
+# ------------------------------------------------------------------
+# 删除项目（级联删除所有关联数据）
+# ------------------------------------------------------------------
+@router.delete("/{project_id}")
+async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """删除项目及其所有关联数据。
+
+    通过 SQL 级联删除章节、设定、会话等关联表数据，
+    最后删除项目本身。
+    """
+    repo = ProjectRepository(db)
+    project = await repo.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # 级联删除关联数据
+    from sqlalchemy import text
+
+    pid = str(project_id)
+
+    # 先查所有有 project_id 列的表
+    try:
+        result = await db.execute(text("""
+            SELECT table_name FROM information_schema.columns
+            WHERE column_name = 'project_id' AND table_schema = 'public'
+        """))
+        direct_tables = [row[0] for row in result.fetchall()]
+    except Exception:
+        direct_tables = []
+
+    # 先删 manuscript_blocks 和 chapter_summaries（通过 chapter_id 关联）
+    for sub_sql in [
+        "DELETE FROM manuscript_blocks WHERE chapter_id IN (SELECT id FROM chapters WHERE project_id = :pid)",
+        "DELETE FROM chapter_summaries WHERE chapter_id IN (SELECT id FROM chapters WHERE project_id = :pid)",
+    ]:
+        try:
+            await db.execute(text(sub_sql), {"pid": pid})
+        except Exception as e:
+            logger.warning("删除关联数据失败: %s", e)
+            await db.rollback()
+            break
+
+    # 再删有 project_id 列的表
+    for table in direct_tables:
+        if table == "projects":
+            continue
+        try:
+            await db.execute(text(f"DELETE FROM {table} WHERE project_id = :pid"), {"pid": pid})
+        except Exception as e:
+            logger.warning("删除 %s 失败: %s", table, e)
+            await db.rollback()
+
+    # 最后用 ORM 删除项目本身
+    try:
+        await db.delete(project)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        # ORM 删除失败，用 SQL 直接删
+        await db.execute(text("DELETE FROM projects WHERE id = :pid"), {"pid": pid})
+        await db.commit()
+
+    return {"ok": True, "project_id": pid}

@@ -62,6 +62,12 @@ export const projectsApi = {
   update: (id: string, data: Partial<Project>) =>
     client.put<Project>(`/api/projects/${id}`, data).then((r) => r.data),
   remove: (id: string) => client.delete(`/api/projects/${id}`).then((r) => r.data),
+  // 删除项目（级联删除所有关联数据）
+  delete: (projectId: string) =>
+    client.delete(`/api/projects/${projectId}`).then((r) => r.data),
+  // 获取上传的大纲信息
+  getOutline: (projectId: string) =>
+    client.get(`/api/projects/${projectId}/outline`).then((r) => r.data),
 }
 
 /* ============================================================
@@ -105,13 +111,13 @@ export const cockpitApi = {
  * ============================================================ */
 export const pipelineApi = {
   generateBible: (projectId: string, hints: BibleHints) =>
-    client.post(`/api/pipeline/${projectId}/generate-bible`, { hints }).then((r) => r.data),
+    client.post(`/api/pipeline/${projectId}/generate-bible`, { hints }, { timeout: 300000 }).then((r) => r.data),
   generateOutline: (projectId: string, params: OutlineParams) =>
-    client.post(`/api/pipeline/${projectId}/generate-outline`, params).then((r) => r.data),
+    client.post(`/api/pipeline/${projectId}/generate-outline`, params, { timeout: 300000 }).then((r) => r.data),
   run: (projectId: string, params: PipelineRunParams) =>
-    client.post(`/api/pipeline/${projectId}/run`, params).then((r) => r.data),
+    client.post(`/api/pipeline/${projectId}/run`, params, { timeout: 600000 }).then((r) => r.data),
   resumeSession: (projectId: string) =>
-    client.post(`/api/pipeline/${projectId}/resume-session`).then((r) => r.data),
+    client.post(`/api/pipeline/${projectId}/resume-session`, {}, { timeout: 600000 }).then((r) => r.data),
 }
 
 /* ============================================================
@@ -260,6 +266,21 @@ export const providerApi = governanceApi
 export const agentRunApi = {
   list: (projectId: string) =>
     client.get<AgentRun[]>(`/api/cockpit/${projectId}/runs`).then((r) => r.data),
+}
+
+/* ============================================================
+ * Continuous（24 小时连续写作）
+ * ============================================================ */
+export const continuousApi = {
+  // 启动连续写作
+  start: (projectId: string) =>
+    client.post(`/api/pipeline/${projectId}/continuous/start`, {}).then((r) => r.data),
+  // 停止连续写作
+  stop: (projectId: string) =>
+    client.post(`/api/pipeline/${projectId}/continuous/stop`, {}).then((r) => r.data),
+  // 查询连续写作状态
+  status: (projectId: string) =>
+    client.get(`/api/pipeline/${projectId}/continuous/status`).then((r) => r.data),
 }
 
 export default client

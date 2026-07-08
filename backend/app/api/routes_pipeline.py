@@ -1,6 +1,7 @@
 """Pipeline 路由 - 生成世界观 / 大纲 / 运行 / 恢复会话。"""
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Optional
 
@@ -13,6 +14,8 @@ from app.db import get_db
 from app.db.models.session import WorkSession
 from app.model_gateway import gateway
 from app.pipeline.orchestrator import PipelineOrchestrator
+
+logger = logging.getLogger("app.api.routes_pipeline")
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -84,7 +87,26 @@ async def generate_bible(
     payload: GenerateBibleRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """生成世界观圣经。"""
+    """生成世界观圣经。
+
+    如果项目上传了详细大纲（extra["outline_text"]），
+    会自动读取并作为参考传给 StoryArchitect。
+    """
+    # 读取项目的大纲文本
+    from app.db.models.project import Project
+
+    proj_stmt = select(Project).where(Project.id == project_id)
+    proj_result = await db.execute(proj_stmt)
+    project = proj_result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    hints = payload.hints or {}
+    outline_text = (project.extra or {}).get("outline_text")
+    if outline_text:
+        hints["outline_text"] = outline_text
+        logger.info("项目 %s 使用上传的大纲生成世界观 (%d 字符)", project_id, len(outline_text))
+
     session = await _create_work_session(
         db, project_id,
         title="生成世界观圣经",
@@ -93,7 +115,8 @@ async def generate_bible(
     )
     orchestrator = _make_orchestrator(db, project_id, session.id)
     try:
-        result = await orchestrator.generate_bible(payload.hints or {})
+        result = await orchestrator.generate_bible(hints)
+        await db.commit()
         return PipelineResult(
             project_id=str(project_id),
             job="generate_bible",
@@ -126,6 +149,7 @@ async def generate_outline(
             chapters_per_volume=payload.chapters_per_volume,
             hints=payload.hints,
         )
+        await db.commit()
         if result.get("status") == "failed":
             session.status = "failed"
             await db.flush()

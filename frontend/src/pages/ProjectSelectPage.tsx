@@ -1,7 +1,7 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, Plus, Loader2, X } from 'lucide-react'
+import { BookOpen, Plus, Loader2, X, Upload, FileText, CheckCircle, Trash2 } from 'lucide-react'
 import { projectsApi, governanceApi } from '../api/client'
 import { useProjectStore } from '../store/projectStore'
 import type { Project } from '../types'
@@ -31,6 +31,7 @@ export default function ProjectSelectPage() {
   const setCurrentProject = useProjectStore((s) => s.setCurrentProject)
 
   const [showCreate, setShowCreate] = useState(false)
+  const [pendingOutline, setPendingOutline] = useState<File | null>(null)
 
   const { data: projects, isLoading } = useQuery({
     queryKey: ['projects'],
@@ -44,10 +45,28 @@ export default function ProjectSelectPage() {
   })
 
   const createMutation = useMutation({
-    mutationFn: projectsApi.create,
+    mutationFn: async (data: any) => {
+      // 1. 创建项目
+      const project = await projectsApi.create(data)
+      // 2. 如果有上传的大纲文件，自动上传
+      if (pendingOutline && project.id) {
+        try {
+          const formData = new FormData()
+          formData.append('file', pendingOutline)
+          await fetch(`/api/projects/${project.id}/upload-outline`, {
+            method: 'POST',
+            body: formData,
+          })
+        } catch (e) {
+          console.error('大纲上传失败:', e)
+        }
+      }
+      return project
+    },
     onSuccess: (project) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       setCurrentProject(project)
+      setPendingOutline(null)
       navigate('/cockpit')
     },
   })
@@ -56,6 +75,13 @@ export default function ProjectSelectPage() {
     setCurrentProject(project)
     navigate('/cockpit')
   }
+
+  // 删除项目 mutation
+  const deleteMutation = useMutation({
+    mutationFn: (projectId: string) => projectsApi.delete(projectId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
+    onError: (err: Error) => alert(`删除失败: ${err.message}`),
+  })
 
   const providerConfigured = (providers?.length ?? 0) > 0
 
@@ -105,7 +131,20 @@ export default function ProjectSelectPage() {
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {projects.map((p) => (
-              <ProjectCard key={p.id} project={p} onOpen={() => handleOpen(p)} />
+              <ProjectCard
+                key={p.id}
+                project={p}
+                onOpen={() => handleOpen(p)}
+                onDelete={() => {
+                  if (
+                    window.confirm(
+                      '确定删除该项目？所有章节和设定将被永久删除。',
+                    )
+                  ) {
+                    deleteMutation.mutate(p.id)
+                  }
+                }}
+              />
             ))}
           </div>
         )}
@@ -113,27 +152,52 @@ export default function ProjectSelectPage() {
 
       {showCreate && (
         <CreateProjectModal
-          onClose={() => setShowCreate(false)}
+          onClose={() => {
+            setShowCreate(false)
+            setPendingOutline(null)
+          }}
           onSubmit={(data) => createMutation.mutate(data)}
           loading={createMutation.isPending}
           error={createMutation.error?.message}
+          outlineFile={pendingOutline}
+          onOutlineChange={setPendingOutline}
         />
       )}
     </div>
   )
 }
 
-function ProjectCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
+function ProjectCard({
+  project,
+  onOpen,
+  onDelete,
+}: {
+  project: Project
+  onOpen: () => void
+  onDelete: () => void
+}) {
   const progress = project.progress ?? 0
   const target = project.target_chapters ?? project.config?.target_chapters ?? 0
   const current = project.current_chapter ?? project.current_chapter_no ?? 0
 
   return (
-    <button
+    <div
       onClick={onOpen}
-      className="group flex flex-col rounded-lg border border-ink-700 bg-ink-850 p-5 text-left transition-colors hover:border-gold-500/40 hover:bg-ink-800"
+      className="group relative flex cursor-pointer flex-col rounded-lg border border-ink-700 bg-ink-850 p-5 text-left transition-colors hover:border-gold-500/40 hover:bg-ink-800"
     >
-      <div className="mb-3 flex items-start justify-between">
+      {/* 删除按钮：右上角，hover 时显示并变红 */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onDelete()
+        }}
+        title="删除项目"
+        className="absolute right-3 top-3 flex h-7 w-7 items-center justify-center rounded-md text-gray-600 opacity-0 transition-all hover:bg-red-600/20 hover:text-red-400 group-hover:opacity-100"
+      >
+        <Trash2 size={15} />
+      </button>
+
+      <div className="mb-3 flex items-start justify-between pr-8">
         <h3 className="line-clamp-2 font-serif text-base font-medium text-gray-100">
           {project.title}
         </h3>
@@ -155,7 +219,7 @@ function ProjectCard({ project, onOpen }: { project: Project; onOpen: () => void
         </div>
         <ProgressBar value={progress} />
       </div>
-    </button>
+    </div>
   )
 }
 
@@ -164,18 +228,37 @@ function CreateProjectModal({
   onSubmit,
   loading,
   error,
+  outlineFile,
+  onOutlineChange,
 }: {
   onClose: () => void
   onSubmit: (data: Partial<Project>) => void
   loading: boolean
   error?: string
+  outlineFile: File | null
+  onOutlineChange: (file: File | null) => void
 }) {
   const [title, setTitle] = useState('')
   const [genre, setGenre] = useState('奇幻')
   const [themes, setThemes] = useState('')
   const [setting, setSetting] = useState('')
   const [tone, setTone] = useState('严肃')
-  const [targetChapters, setTargetChapters] = useState('20')
+  const [lengthType, setLengthType] = useState('long')
+  const [uploadingOutline, setUploadingOutline] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      const validExts = ['.docx', '.txt', '.md', '.markdown']
+      const ext = file.name.toLowerCase().match(/\.\w+$/)?.[0]
+      if (ext && validExts.includes(ext)) {
+        onOutlineChange(file)
+      } else {
+        alert('请上传 .docx / .txt / .md 格式的文件')
+      }
+    }
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -185,18 +268,32 @@ function CreateProjectModal({
       .map((t) => t.trim())
       .filter(Boolean)
 
+    // 篇幅类型 → 章数范围（Agent 在生成大纲时会在此范围内合理安排）
+    const LENGTH_PRESETS: Record<string, { label: string; min: number; max: number; words: string }> = {
+      short: { label: '短篇', min: 5, max: 30, words: '3-20万字' },
+      medium: { label: '中篇', min: 30, max: 100, words: '20-70万字' },
+      long: { label: '长篇', min: 100, max: 500, words: '70-350万字' },
+      epic: { label: '大长篇', min: 500, max: 2000, words: '350-1400万字' },
+      mega: { label: '超长篇', min: 2000, max: 5000, words: '1400-3500万字' },
+    }
+    const preset = LENGTH_PRESETS[lengthType] || LENGTH_PRESETS.long
+
     onSubmit({
       title: title.trim(),
       genre: genre,
       type: genre,
       // 后端会把 description 映射为 synopsis（别名）
       description: setting.trim() || undefined,
-      // 目标章数 —— 后端会存入 extra dict
-      target_chapters: Number(targetChapters) || 20,
-      // 自主等级 —— 后端会存入 extra
+      // 目标章数取中间值，Agent 会在 min~max 范围内合理安排
+      target_chapters: Math.round((preset.min + preset.max) / 2),
+      // 篇幅类型与范围传给后端，Agent 生成大纲时参考
       autonomy_level: 'L2',
       config: {
-        target_chapters: Number(targetChapters) || 20,
+        target_chapters: Math.round((preset.min + preset.max) / 2),
+        length_type: lengthType,
+        length_label: preset.label,
+        chapter_range: { min: preset.min, max: preset.max },
+        estimated_words: preset.words,
         genre: genre,
         tone: tone,
         autonomy_level: 'L2',
@@ -284,14 +381,84 @@ function CreateProjectModal({
             />
           </div>
 
+          {/* 上传详细大纲 */}
           <div>
-            <label className="mb-1.5 block text-xs text-gray-400">目标章数</label>
-            <Input
-              type="number"
-              value={targetChapters}
-              onChange={(e) => setTargetChapters(e.target.value)}
-              placeholder="20"
+            <label className="mb-1.5 block text-xs text-gray-400">
+              上传详细大纲（可选）
+            </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".docx,.txt,.md,.markdown"
+              onChange={handleFileSelect}
+              className="hidden"
             />
+            {outlineFile ? (
+              <div className="flex items-center gap-3 rounded-md border border-green-600/30 bg-green-600/10 px-3 py-2.5">
+                <CheckCircle size={18} className="text-green-400" />
+                <div className="flex-1 min-w-0">
+                  <p className="truncate text-sm text-gray-200">{outlineFile.name}</p>
+                  <p className="text-xs text-gray-500">
+                    {(outlineFile.size / 1024).toFixed(1)} KB · 已就绪
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOutlineChange(null)}
+                  className="text-gray-500 hover:text-red-400"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex w-full items-center gap-3 rounded-md border border-dashed border-ink-600 px-3 py-3 text-left transition-colors hover:border-gold-500/40 hover:bg-ink-800/50"
+              >
+                <Upload size={18} className="text-gray-500" />
+                <div>
+                  <p className="text-sm text-gray-300">点击上传大纲文件</p>
+                  <p className="text-xs text-gray-600">
+                    支持 .docx / .txt / .md — AI 将按照你的大纲生成世界观
+                  </p>
+                </div>
+              </button>
+            )}
+            <p className="mt-1.5 text-xs text-gray-600">
+              上传后，系统会解析大纲内容，在生成世界观时严格参考你的设定
+            </p>
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs text-gray-400">篇幅类型</label>
+            <div className="grid grid-cols-5 gap-2">
+              {([
+                { key: 'short', label: '短篇', range: '5-30章', desc: '3-20万字' },
+                { key: 'medium', label: '中篇', range: '30-100章', desc: '20-70万字' },
+                { key: 'long', label: '长篇', range: '100-500章', desc: '70-350万字' },
+                { key: 'epic', label: '大长篇', range: '500-2000章', desc: '350-1400万字' },
+                { key: 'mega', label: '超长篇', range: '2000-5000章', desc: '1400-3500万字' },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setLengthType(opt.key)}
+                  className={`rounded-md border px-2 py-2 text-center transition-colors ${
+                    lengthType === opt.key
+                      ? 'border-gold-500/60 bg-gold-500/10 text-gold-300'
+                      : 'border-ink-600 bg-ink-900 text-gray-400 hover:border-ink-500 hover:text-gray-300'
+                  }`}
+                >
+                  <p className="text-sm font-medium">{opt.label}</p>
+                  <p className="text-xs text-gray-600">{opt.range}</p>
+                  <p className="text-xs text-gray-700">{opt.desc}</p>
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-xs text-gray-600">
+              Agent 会根据篇幅类型自动安排合理的卷数与章数
+            </p>
           </div>
 
           <div className="flex justify-end gap-2 pt-2">

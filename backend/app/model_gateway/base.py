@@ -34,6 +34,8 @@ class LLMRequest:
         stream: 是否流式返回。
         response_format: 响应格式，如 ``{"type": "json_object"}``。
         stop: 停止序列列表。
+        is_reasoning_model: 是否为推理模型。推理模型会自动提升 max_tokens、
+            跳过 response_format、并通过 reasoning_content 字段返回思考过程。
     """
 
     messages: list[LLMMessage]
@@ -43,6 +45,7 @@ class LLMRequest:
     stream: bool = False
     response_format: Optional[dict] = None  # {"type": "json_object"}
     stop: Optional[list[str]] = None
+    is_reasoning_model: bool = False
 
 
 @dataclass
@@ -50,7 +53,9 @@ class LLMResponse:
     """LLM 响应结果。
 
     Attributes:
-        content: 生成的文本内容。
+        content: 生成的文本内容（普通模型的主要输出）。
+        reasoning_content: 推理模型的思考过程（推理模型可能 content 为空，
+            真正的结构化内容在 reasoning_content 中）。
         input_tokens: 输入 token 数。
         output_tokens: 输出 token 数。
         model: 实际使用的模型名称。
@@ -58,9 +63,10 @@ class LLMResponse:
     """
 
     content: str
-    input_tokens: int
-    output_tokens: int
-    model: str
+    reasoning_content: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
     finish_reason: str = "stop"
 
 

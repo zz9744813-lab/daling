@@ -101,8 +101,8 @@ class PipelineOrchestrator:
         """生成故事大纲。
 
         Args:
-            volume_count: 卷数。
-            chapters_per_volume: 每卷章节数。
+            volume_count: 卷数（如未指定，则从项目配置自动推算）。
+            chapters_per_volume: 每卷章节数（如未指定，则自动推算）。
             hints: 额外提示。
 
         Returns:
@@ -121,6 +121,54 @@ class PipelineOrchestrator:
                 "status": "failed",
                 "error": "请先生成世界观圣经",
             }
+
+        # 从项目 extra 读取篇幅配置，自动推算卷数与每卷章数
+        from app.db.models.project import Project
+
+        proj_stmt = select(Project).where(Project.id == self.project_id)
+        proj_result = await self.db.execute(proj_stmt)
+        project = proj_result.scalar_one_or_none()
+        extra = (project.extra or {}) if project else {}
+
+        chapter_range = extra.get("chapter_range")
+        length_label = extra.get("length_label", "")
+
+        if chapter_range:
+            rng_min = chapter_range.get("min", 10)
+            rng_max = chapter_range.get("max", 50)
+            target_total = (rng_min + rng_max) // 2
+            # 每卷 30-50 章较合理，据此推算卷数
+            if target_total <= 30:
+                volume_count = 1
+                chapters_per_volume = max(target_total, 5)
+            elif target_total <= 100:
+                volume_count = max(target_total // 30, 1)
+                chapters_per_volume = target_total // volume_count
+            else:
+                chapters_per_volume = 40  # 每卷约 40 章
+                volume_count = max(target_total // chapters_per_volume, 1)
+            logger.info(
+                "项目 %s 篇幅=%s, 目标 %d 章 → %d 卷 × %d 章/卷",
+                self.project_id, length_label, target_total,
+                volume_count, chapters_per_volume,
+            )
+
+        # 将篇幅信息传给 StoryArchitect
+        if hints is None:
+            hints = {}
+        if chapter_range:
+            hints["chapter_range"] = chapter_range
+            hints["length_label"] = length_label
+            hints["target_total_chapters"] = (chapter_range.get("min", 10) + chapter_range.get("max", 50)) // 2
+
+        # 如果用户上传了详细大纲，直接传给 StoryArchitect 解析
+        outline_text = extra.get("outline_text")
+        if outline_text and outline_text.strip():
+            hints["outline_text"] = outline_text
+            logger.info(
+                "项目 %s 使用上传的大纲生成章节结构 (%d 字符)",
+                self.project_id, len(outline_text),
+            )
 
         volumes = await agent.generate_outline(
             world_bible=world_bible,
