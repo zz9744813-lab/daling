@@ -31,6 +31,7 @@ from app.db.models.chapter import Chapter, ManuscriptBlock
 from app.db.models.session import WorkSession
 from app.db.models.storyline import StorylineBeat
 from app.db.models.world import WorldBible
+from app.domain.errors import AgentExecutionError
 from app.model_gateway import Gateway
 
 logger = logging.getLogger("app.pipeline.orchestrator")
@@ -357,7 +358,20 @@ class PipelineOrchestrator:
                     plan=plan,
                     chapter_id=chapter.id,
                 )
-                # 删除旧 blocks（在 Rewriter 创建新 blocks 之后）
+                # 数据保护：Rewriter 返回空列表时不删除旧 blocks
+                if not blocks:
+                    logger.error(
+                        "项目 %s 第 %d 章 Rewriter 返回空结果，保留旧版本不删除",
+                        self.project_id, chapter_no,
+                    )
+                    # 不执行 _delete_blocks，保留上一轮的正文
+                    raise AgentExecutionError(
+                        "Rewriter 返回空结果，已阻止删除旧版本",
+                        agent_name="Rewriter",
+                        project_id=str(self.project_id),
+                        chapter_no=chapter_no,
+                    )
+                # 有新 blocks 才删除旧 blocks 并添加新的
                 await self._delete_blocks(chapter.id)
                 for block in blocks:
                     self.db.add(block)
@@ -379,17 +393,24 @@ class PipelineOrchestrator:
                 quality_threshold=quality_threshold,
             )
 
-            # 7. MemoryKeeper — 状态更新
-            keeper = MemoryKeeper(
-                gateway=self.gateway, db=self.db,
-                project_id=self.project_id, session_id=self.session_id,
-            )
-            # 注入自定义系统提示词
-            keeper.custom_system_prompt = self.custom_system_prompt
-            memory_result = await keeper.update_state(chapter.id, blocks)
-
             final_score = finalize_result.get("final_score", 0)
             approved = finalize_result.get("approved", False)
+
+            # 7. MemoryKeeper — 只有批准的章节才执行记忆更新
+            memory_result: dict[str, Any] = {}
+            if approved:
+                keeper = MemoryKeeper(
+                    gateway=self.gateway, db=self.db,
+                    project_id=self.project_id, session_id=self.session_id,
+                )
+                # 注入自定义系统提示词
+                keeper.custom_system_prompt = self.custom_system_prompt
+                memory_result = await keeper.update_state(chapter.id, blocks)
+            else:
+                logger.warning(
+                    "项目 %s 第 %d 章未获批准 (score=%d)，跳过记忆更新",
+                    self.project_id, chapter_no, final_score,
+                )
 
             logger.info(
                 "项目 %s 第 %d 章生成完成: approved=%s, score=%d",
@@ -420,8 +441,11 @@ class PipelineOrchestrator:
                 chapter = await self._get_or_create_chapter(chapter_no)
                 chapter.status = "draft"
                 await self.db.flush()
-            except Exception:
-                pass
+            except Exception as rollback_exc:
+                logger.error(
+                    "项目 %s 第 %d 章状态回滚失败: %s",
+                    self.project_id, chapter_no, rollback_exc,
+                )
 
             return {
                 "chapter_no": chapter_no,

@@ -17,6 +17,7 @@ from app.db.models.chapter import Chapter, ManuscriptBlock
 from app.db.models.character import Character
 from app.db.models.plot import CurrentStoryState, PlotThread
 from app.db.models.summary import ChapterSummary, NarrativeSummary
+from app.domain.errors import AgentExecutionError, EmptyResultError
 from app.prompts.templates.summary import SUMMARY_SYSTEM, SUMMARY_USER
 
 logger = logging.getLogger("app.agents.memory_keeper")
@@ -83,8 +84,23 @@ class MemoryKeeper(BaseAgent):
                 temperature=0.3,
             )
         except Exception as exc:
-            logger.warning("项目 %s MemoryKeeper LLM 失败: %s", self.project_id, exc)
-            summary_result = {}
+            logger.error("项目 %s MemoryKeeper LLM 调用失败: %s", self.project_id, exc)
+            raise AgentExecutionError(
+                "MemoryKeeper LLM 调用失败，不使用空数据更新状态",
+                agent_name="MemoryKeeper",
+                project_id=str(self.project_id),
+                chapter_no=chapter_no,
+                cause=exc,
+            ) from exc
+
+        # 校验：摘要为空时不应继续
+        if not summary_result.get("summary", "").strip():
+            raise EmptyResultError(
+                "MemoryKeeper 返回空摘要，不使用空数据更新状态",
+                agent_name="MemoryKeeper",
+                project_id=str(self.project_id),
+                chapter_no=chapter_no,
+            )
 
         # 2. 保存 ChapterSummary
         chapter_summary = ChapterSummary(

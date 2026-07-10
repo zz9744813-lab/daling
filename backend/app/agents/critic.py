@@ -13,6 +13,7 @@ from sqlalchemy import select
 from app.agents.base import BaseAgent
 from app.db.models.chapter import ManuscriptBlock
 from app.db.models.character import Character
+from app.domain.errors import EmptyResultError, QualityCheckError
 from app.prompts.templates.critic import CRITIC_SYSTEM, CRITIC_USER
 
 logger = logging.getLogger("app.agents.critic")
@@ -56,22 +57,36 @@ class Critic(BaseAgent):
                 temperature=0.3,
             )
         except Exception as exc:
-            logger.warning(
-                "项目 %s Critic LLM 调用失败，使用默认评分: %s",
+            logger.error(
+                "项目 %s Critic LLM 调用失败: %s",
                 self.project_id, exc,
             )
-            result = {}
+            raise QualityCheckError(
+                "Critic LLM 调用失败",
+                agent_name="critic",
+                project_id=self.project_id,
+                cause=exc,
+            ) from exc
 
-        # 确保关键字段存在
+        # 校验：评分不能为空
         scores = result.get("scores", {})
-        for key in ("plot_coherence", "character_consistency", "prose_quality", "pacing", "emotional_impact"):
-            scores.setdefault(key, 75)
+        if not scores:
+            raise EmptyResultError(
+                "Critic 返回空评分",
+                agent_name="critic",
+                project_id=self.project_id,
+            )
 
         issues = result.get("issues", [])
         overall_score = result.get("overall_score")
         if overall_score is None:
-            overall_score = int(sum(scores.values()) / len(scores)) if scores else 75
+            raise EmptyResultError(
+                "Critic 返回的评分缺少 overall_score",
+                agent_name="critic",
+                project_id=self.project_id,
+            )
 
+        # verdict 推算逻辑（仅在 LLM 成功时执行）
         verdict = result.get("verdict")
         if not verdict:
             has_high = any(i.get("severity") == "high" for i in issues)

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.agents.base import BaseAgent
 from app.db.models.chapter import ManuscriptBlock
 from app.db.models.character import Character
+from app.domain.errors import AgentExecutionError, EmptyResultError
 from app.prompts.templates.rewriter import REWRITER_SYSTEM, REWRITER_USER
 
 logger = logging.getLogger("app.agents.rewriter")
@@ -56,8 +57,27 @@ class Rewriter(BaseAgent):
                 max_tokens=8192,
             )
         except Exception as exc:
-            logger.warning("项目 %s Rewriter LLM 调用失败: %s", self.project_id, exc)
-            return []
+            logger.error("项目 %s Rewriter LLM 调用失败: %s", self.project_id, exc)
+            raise AgentExecutionError(
+                "Rewriter LLM 调用失败",
+                agent_name="rewriter",
+                project_id=self.project_id,
+                cause=exc,
+            ) from exc
+
+        # 校验：修订正文不能为空或过短
+        if not revised_text or not revised_text.strip():
+            raise EmptyResultError(
+                "Rewriter 返回空正文",
+                agent_name="rewriter",
+                project_id=self.project_id,
+            )
+        if len(revised_text) < 100:
+            raise EmptyResultError(
+                f"Rewriter 正文过短（{len(revised_text)}字）",
+                agent_name="rewriter",
+                project_id=self.project_id,
+            )
 
         new_blocks = self._split_into_blocks(revised_text, chapter_id)
         logger.info(

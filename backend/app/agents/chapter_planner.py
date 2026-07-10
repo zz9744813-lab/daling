@@ -16,6 +16,7 @@ from app.db.models.chapter import Chapter
 from app.db.models.plot import CurrentStoryState, PlotThread
 from app.db.models.storyline import StorylineBeat
 from app.db.models.summary import ChapterSummary
+from app.domain.errors import AgentExecutionError, EmptyResultError
 from app.prompts.templates.chapter_plan import CHAPTER_PLAN_SYSTEM, CHAPTER_PLAN_USER
 
 logger = logging.getLogger("app.agents.chapter_planner")
@@ -69,19 +70,30 @@ class ChapterPlanner(BaseAgent):
                 temperature=0.6,
             )
         except Exception as exc:
-            logger.warning("项目 %s ChapterPlanner LLM 失败，使用默认计划: %s", self.project_id, exc)
-            plan = {}
+            logger.error("项目 %s ChapterPlanner LLM 调用失败: %s", self.project_id, exc)
+            raise AgentExecutionError(
+                "ChapterPlanner LLM 调用失败",
+                agent_name="chapter_planner",
+                project_id=self.project_id,
+                chapter_no=chapter_no,
+                cause=exc,
+            ) from exc
 
-        # 确保关键字段存在
-        plan.setdefault("chapter_no", chapter_no)
-        plan.setdefault("chapter_title", f"第{chapter_no}章")
-        plan.setdefault("scene_list", [])
-        plan.setdefault("overall_goal", "")
-        plan.setdefault("ending_hook", "")
+        # 注入章节编号（覆盖传入参数，非默认值填充）
+        plan["chapter_no"] = chapter_no
+
+        # 校验：场景列表不能为空
+        if not plan.get("scene_list"):
+            raise EmptyResultError(
+                "ChapterPlanner 返回空场景列表",
+                agent_name="chapter_planner",
+                project_id=self.project_id,
+                chapter_no=chapter_no,
+            )
 
         logger.info(
             "项目 %s 第 %d 章写作计划已生成: %d 个场景",
-            self.project_id, chapter_no, len(plan.get("scene_list", [])),
+            self.project_id, chapter_no, len(plan["scene_list"]),
         )
         return plan
 

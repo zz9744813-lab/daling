@@ -14,6 +14,7 @@ from app.agents.base import BaseAgent
 from app.db.models.chapter import Chapter, ManuscriptBlock
 from app.db.models.character import Character
 from app.db.models.world import WorldBible
+from app.domain.errors import AgentExecutionError, EmptyResultError
 from app.prompts.templates.draft import DRAFT_SYSTEM, DRAFT_USER, SCENE_DRAFT_SYSTEM
 
 logger = logging.getLogger("app.agents.drafter")
@@ -61,8 +62,27 @@ class Drafter(BaseAgent):
                 max_tokens=8192,
             )
         except Exception as exc:
-            logger.warning("项目 %s Drafter LLM 失败，使用占位文本: %s", self.project_id, exc)
-            full_text = "（正文生成失败，请稍后重试）"
+            logger.error("项目 %s Drafter LLM 调用失败: %s", self.project_id, exc)
+            raise AgentExecutionError(
+                "Drafter LLM 调用失败",
+                agent_name="drafter",
+                project_id=self.project_id,
+                cause=exc,
+            ) from exc
+
+        # 校验：正文不能为空或过短
+        if not full_text or not full_text.strip():
+            raise EmptyResultError(
+                "Drafter 返回空正文",
+                agent_name="drafter",
+                project_id=self.project_id,
+            )
+        if len(full_text) < 100:
+            raise EmptyResultError(
+                f"Drafter 正文过短（{len(full_text)}字），可能生成不完整",
+                agent_name="drafter",
+                project_id=self.project_id,
+            )
 
         # 将正文切分为 ManuscriptBlock
         blocks = self._split_into_blocks(full_text, chapter_id)

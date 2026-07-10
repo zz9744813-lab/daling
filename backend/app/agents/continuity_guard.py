@@ -17,6 +17,7 @@ from app.db.models.character import Character
 from app.db.models.plot import PlotThread
 from app.db.models.summary import ChapterSummary
 from app.db.models.world import WorldBible
+from app.domain.errors import EmptyResultError, QualityCheckError
 from app.prompts.templates.continuity import CONTINUITY_SYSTEM, CONTINUITY_USER
 
 logger = logging.getLogger("app.agents.continuity_guard")
@@ -57,23 +58,33 @@ class ContinuityGuard(BaseAgent):
                 temperature=0.2,
             )
         except Exception as exc:
-            logger.warning(
-                "项目 %s ContinuityGuard LLM 调用失败，使用默认结果: %s",
+            logger.error(
+                "项目 %s ContinuityGuard LLM 调用失败: %s",
                 self.project_id, exc,
             )
-            result = {}
+            raise QualityCheckError(
+                "ContinuityGuard LLM 调用失败",
+                agent_name="continuity_guard",
+                project_id=self.project_id,
+                cause=exc,
+            ) from exc
 
-        result.setdefault("passed", True)
-        result.setdefault("conflicts", [])
-        result.setdefault("warnings", [])
+        # 校验：结果必须包含 passed 字段
+        if "passed" not in result:
+            raise EmptyResultError(
+                "ContinuityGuard 返回结果缺少 passed 字段",
+                agent_name="continuity_guard",
+                project_id=self.project_id,
+            )
 
-        if result["conflicts"]:
+        # 存在冲突时标记为未通过
+        if result.get("conflicts"):
             result["passed"] = False
 
         logger.info(
             "项目 %s 第 %d 章一致性校验: passed=%s, %d 个冲突, %d 个警告",
             self.project_id, chapter_no, result["passed"],
-            len(result["conflicts"]), len(result["warnings"]),
+            len(result.get("conflicts", [])), len(result.get("warnings", [])),
         )
         return result
 
