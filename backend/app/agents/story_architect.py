@@ -43,6 +43,8 @@ class StoryArchitect(BaseAgent):
         """
         # 提取上传的大纲文本（如果有）
         outline_text = hints.pop("outline_text", None)
+        # 提取用户创作灵感（从零开始模式时用户填写的文本）
+        creative_prompt = hints.pop("creative_prompt", None)
 
         hints_text = json.dumps(hints, ensure_ascii=False, indent=2)
 
@@ -67,6 +69,13 @@ class StoryArchitect(BaseAgent):
             )
         else:
             user_prompt = WORLD_BIBLE_USER.format(hints=hints_text)
+
+        # 如果有用户创作灵感，追加到 user_prompt 末尾
+        if creative_prompt and creative_prompt.strip():
+            user_prompt += (
+                f"\n\n【用户创作灵感】\n{creative_prompt}\n\n"
+                "请在生成世界观时充分参考用户的创作意图。"
+            )
 
         try:
             content = await self._llm_json(

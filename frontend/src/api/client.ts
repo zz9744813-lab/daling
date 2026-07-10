@@ -68,6 +68,15 @@ export const projectsApi = {
   // 获取上传的大纲信息
   getOutline: (projectId: string) =>
     client.get(`/api/projects/${projectId}/outline`).then((r) => r.data),
+  // 获取项目的自定义系统提示词（类似 Gemini Gems）
+  getCustomPrompt: (projectId: string) =>
+    client.get(`/api/projects/${projectId}/custom-prompt`).then((r) => r.data),
+  // 更新项目的自定义系统提示词
+  updateCustomPrompt: (projectId: string, text: string) =>
+    client.put(`/api/projects/${projectId}/custom-prompt`, { text }).then((r) => r.data),
+  // 对话式创建项目：多轮对话引导用户描述故事，或从对话中提取项目配置
+  chatCreate: (messages: { role: string; content: string }[], extract?: boolean) =>
+    client.post('/api/projects/chat-create', { messages, extract: extract || false }).then((r) => r.data),
 }
 
 /* ============================================================

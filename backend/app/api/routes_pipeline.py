@@ -107,6 +107,12 @@ async def generate_bible(
         hints["outline_text"] = outline_text
         logger.info("项目 %s 使用上传的大纲生成世界观 (%d 字符)", project_id, len(outline_text))
 
+    # 从 project.extra 中读取创作灵感（从零开始模式时用户填写的）
+    creative_prompt = (project.extra or {}).get("creative_prompt")
+    if creative_prompt:
+        hints["creative_prompt"] = creative_prompt
+        logger.info("项目 %s 使用创作灵感生成世界观 (%d 字符)", project_id, len(creative_prompt))
+
     session = await _create_work_session(
         db, project_id,
         title="生成世界观圣经",

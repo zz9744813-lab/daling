@@ -19,11 +19,13 @@ import {
   WifiOff,
   AlertTriangle,
   Zap,
+  Settings,
+  X,
 } from 'lucide-react'
 import { TopBar } from '../layout/TopBar'
 import { BossCommandBar } from '../layout/BossCommandBar'
 import { AppShell, AppShellBody } from '../layout/AppShell'
-import { cockpitApi, pipelineApi, brainApi, canonFactsApi, reviewQueueApi, continuousApi } from '../api/client'
+import { cockpitApi, pipelineApi, brainApi, canonFactsApi, reviewQueueApi, continuousApi, projectsApi } from '../api/client'
 import { useProjectStore } from '../store/projectStore'
 import { useCockpitStream } from '../hooks/useCockpitStream'
 import { cn } from '../lib/cn'
@@ -57,6 +59,9 @@ export default function CockpitPage() {
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(false)
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null)
+  // 创作指令模态框状态
+  const [showPromptModal, setShowPromptModal] = useState(false)
+  const [promptEditing, setPromptEditing] = useState('')
 
   // ===== 创作舱概览数据 =====
   const { data: cockpit, refetch: refetchCockpit } = useQuery({
@@ -213,6 +218,30 @@ export default function CockpitPage() {
     },
   })
 
+  // ===== 创作指令（自定义系统提示词，类似 Gemini Gems） =====
+  const { data: customPromptData } = useQuery({
+    queryKey: ['custom-prompt', projectId],
+    queryFn: () => projectsApi.getCustomPrompt(projectId),
+    enabled: !!projectId,
+  })
+
+  const savePromptMutation = useMutation({
+    mutationFn: (text: string) => projectsApi.updateCustomPrompt(projectId, text),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['custom-prompt', projectId] })
+      setShowPromptModal(false)
+    },
+    onError: (err: Error) => {
+      alert(`保存失败: ${err.message}`)
+    },
+  })
+
+  // 打开创作指令编辑模态框
+  const handleOpenPromptModal = () => {
+    setPromptEditing(customPromptData?.text ?? '')
+    setShowPromptModal(true)
+  }
+
   // ===== 连续写作（24 小时不间断后台写作） =====
   // 每 5 秒轮询连续写作状态
   const { data: continuousStatus, refetch: refetchContinuous } = useQuery({
@@ -353,6 +382,11 @@ export default function CockpitPage() {
               onClick={() => takeoverMutation.mutate()}
               loading={takeoverMutation.isPending}
             />
+            <ToolbarButton
+              icon={<Settings size={13} />}
+              label="创作指令"
+              onClick={handleOpenPromptModal}
+            />
 
             <div className="ml-auto flex items-center gap-2 text-xs text-gray-500">
               {runStatus && (
@@ -473,6 +507,73 @@ export default function CockpitPage() {
           >
             <PanelRight size={16} />
           </button>
+        )}
+
+        {/* 创作指令编辑模态框（类似 Gemini Gems 自定义系统提示词） */}
+        {showPromptModal && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+            onClick={() => setShowPromptModal(false)}
+          >
+            <div
+              className="w-full max-w-xl rounded-lg border border-ink-700 bg-ink-850 p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 模态框标题 */}
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h3 className="flex items-center gap-2 text-base font-medium text-gray-100">
+                    <Settings size={16} className="text-gold-400" />
+                    AI 创作指令
+                  </h3>
+                  <p className="mt-1 text-xs text-gray-500">
+                    类似 Gemini Gems / Custom GPTs，定义 AI 的角色、写作风格、行为准则。这些指令会注入到所有 Agent 的系统提示词中。
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowPromptModal(false)}
+                  className="text-gray-500 hover:text-gray-300"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* 编辑文本框 */}
+              <textarea
+                value={promptEditing}
+                onChange={(e) => setPromptEditing(e.target.value)}
+                rows={10}
+                autoFocus
+                placeholder="输入你希望 AI 遵循的创作指令...&#10;例如：你是一位擅长写热血玄幻的作家，语言风格要简洁有力，多用短句，注重动作描写，少用心理独白"
+                className="w-full resize-none rounded-md border border-ink-600 bg-ink-900 px-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30"
+              />
+
+              {/* 底部操作按钮 */}
+              <div className="mt-4 flex items-center justify-between">
+                <span className="text-xs text-gray-600">
+                  {promptEditing.length} 字符
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowPromptModal(false)}
+                    className="rounded-md px-3 py-1.5 text-xs text-gray-400 transition-colors hover:bg-ink-700 hover:text-gray-200"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={() => savePromptMutation.mutate(promptEditing)}
+                    disabled={savePromptMutation.isPending}
+                    className="flex items-center gap-1.5 rounded-md bg-gold-500 px-4 py-1.5 text-xs font-medium text-ink-950 transition-colors hover:bg-gold-400 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {savePromptMutation.isPending && (
+                      <Loader2 size={12} className="animate-spin" />
+                    )}
+                    保存
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </AppShellBody>
 

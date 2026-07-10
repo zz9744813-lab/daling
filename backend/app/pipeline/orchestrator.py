@@ -61,6 +61,33 @@ class PipelineOrchestrator:
         self.db = db
         self.project_id = project_id
         self.session_id = session_id
+        # 项目专属自定义系统提示词（类似 Gemini Gems），注入到所有 Agent 的 system prompt
+        self.custom_system_prompt: str = ""
+
+    async def _load_custom_prompt(self):
+        """从 project_configs 表加载自定义系统提示词。
+
+        查询 key='custom_system_prompt' 的配置记录，将其值赋给
+        self.custom_system_prompt，供后续注入到各 Agent 的 system prompt。
+        """
+        from app.db.models.project import ProjectConfig
+
+        result = await self.db.execute(
+            select(ProjectConfig).where(
+                ProjectConfig.project_id == self.project_id,
+                ProjectConfig.key == "custom_system_prompt",
+            )
+        )
+        config = result.scalar_one_or_none()
+        if config and config.value:
+            # value 可能是 dict（如 {"text": "..."}）或纯字符串
+            self.custom_system_prompt = (
+                config.value.get("text", "")
+                if isinstance(config.value, dict)
+                else str(config.value)
+            )
+        else:
+            self.custom_system_prompt = ""
 
     # ------------------------------------------------------------------
     # Phase: 生成世界观
@@ -74,12 +101,17 @@ class PipelineOrchestrator:
         Returns:
             结果 dict，包含 world_bible 信息。
         """
+        # 加载项目专属自定义系统提示词
+        await self._load_custom_prompt()
+
         agent = StoryArchitect(
             gateway=self.gateway,
             db=self.db,
             project_id=self.project_id,
             session_id=self.session_id,
         )
+        # 注入自定义系统提示词到 Agent
+        agent.custom_system_prompt = self.custom_system_prompt
         world_bible = await agent.generate_world_bible(hints)
         return {
             "job": "generate_bible",
@@ -108,12 +140,17 @@ class PipelineOrchestrator:
         Returns:
             结果 dict，包含大纲信息。
         """
+        # 加载项目专属自定义系统提示词
+        await self._load_custom_prompt()
+
         agent = StoryArchitect(
             gateway=self.gateway,
             db=self.db,
             project_id=self.project_id,
             session_id=self.session_id,
         )
+        # 注入自定义系统提示词到 Agent
+        agent.custom_system_prompt = self.custom_system_prompt
         world_bible = await agent.get_latest_world_bible()
         if not world_bible:
             return {
@@ -213,6 +250,9 @@ class PipelineOrchestrator:
             self.project_id, chapter_no, mode,
         )
 
+        # 加载项目专属自定义系统提示词（影响所有 Agent）
+        await self._load_custom_prompt()
+
         try:
             # 获取或创建 Chapter
             chapter = await self._get_or_create_chapter(chapter_no)
@@ -224,6 +264,8 @@ class PipelineOrchestrator:
                 gateway=self.gateway, db=self.db,
                 project_id=self.project_id, session_id=self.session_id,
             )
+            # 注入自定义系统提示词
+            planner.custom_system_prompt = self.custom_system_prompt
             plan = await planner.plan_chapter(chapter_no)
 
             # 2. Drafter — 起草正文
@@ -231,6 +273,8 @@ class PipelineOrchestrator:
                 gateway=self.gateway, db=self.db,
                 project_id=self.project_id, session_id=self.session_id,
             )
+            # 注入自定义系统提示词
+            drafter.custom_system_prompt = self.custom_system_prompt
             blocks = await drafter.draft_chapter(plan, chapter_id=chapter.id)
 
             # 持久化初始 blocks，并创建内容快照
@@ -253,10 +297,14 @@ class PipelineOrchestrator:
                 gateway=self.gateway, db=self.db,
                 project_id=self.project_id, session_id=self.session_id,
             )
+            # 注入自定义系统提示词
+            critic.custom_system_prompt = self.custom_system_prompt
             rewriter = Rewriter(
                 gateway=self.gateway, db=self.db,
                 project_id=self.project_id, session_id=self.session_id,
             )
+            # 注入自定义系统提示词
+            rewriter.custom_system_prompt = self.custom_system_prompt
 
             critic_result: dict[str, Any] = {}
             continuity_result: dict[str, Any] = {}
@@ -275,6 +323,8 @@ class PipelineOrchestrator:
                     gateway=self.gateway, db=self.db,
                     project_id=self.project_id, session_id=self.session_id,
                 )
+                # 注入自定义系统提示词
+                guard.custom_system_prompt = self.custom_system_prompt
                 continuity_result = await guard.check_texts(block_texts, chapter_no)
 
                 # 判断是否需要重写
@@ -319,6 +369,8 @@ class PipelineOrchestrator:
                 gateway=self.gateway, db=self.db,
                 project_id=self.project_id, session_id=self.session_id,
             )
+            # 注入自定义系统提示词
+            editor.custom_system_prompt = self.custom_system_prompt
             quality_threshold = 80 if mode == "L2" else 70
             finalize_result = await editor.finalize(
                 chapter_id=chapter.id,
@@ -332,6 +384,8 @@ class PipelineOrchestrator:
                 gateway=self.gateway, db=self.db,
                 project_id=self.project_id, session_id=self.session_id,
             )
+            # 注入自定义系统提示词
+            keeper.custom_system_prompt = self.custom_system_prompt
             memory_result = await keeper.update_state(chapter.id, blocks)
 
             final_score = finalize_result.get("final_score", 0)

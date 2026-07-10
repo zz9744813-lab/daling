@@ -184,6 +184,87 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 
 # ------------------------------------------------------------------
+# 自定义系统提示词（类似 Gemini Gems / Custom GPTs）
+# ------------------------------------------------------------------
+
+@router.get("/{project_id}/custom-prompt")
+async def get_custom_prompt(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """获取项目的自定义系统提示词。
+
+    从 project_configs 表读取 key='custom_system_prompt' 的记录，
+    返回 {"text": "..."} 格式。如不存在则返回空文本。
+    """
+    from sqlalchemy import select as sa_select
+    from app.db.models.project import ProjectConfig
+
+    result = await db.execute(
+        sa_select(ProjectConfig).where(
+            ProjectConfig.project_id == project_id,
+            ProjectConfig.key == "custom_system_prompt",
+        )
+    )
+    config = result.scalar_one_or_none()
+    if config and config.value:
+        text = (
+            config.value.get("text", "")
+            if isinstance(config.value, dict)
+            else str(config.value)
+        )
+    else:
+        text = ""
+    return {"project_id": str(project_id), "text": text}
+
+
+@router.put("/{project_id}/custom-prompt")
+async def update_custom_prompt(
+    project_id: uuid.UUID,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """更新项目的自定义系统提示词。
+
+    payload: {"text": "..."}
+    存入 project_configs 表，key='custom_system_prompt'，value={"text": "..."}。
+    这些指令会注入到所有 Agent 的 system prompt 中。
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.db.models.project import ProjectConfig
+
+    text = payload.get("text", "")
+
+    result = await db.execute(
+        sa_select(ProjectConfig).where(
+            ProjectConfig.project_id == project_id,
+            ProjectConfig.key == "custom_system_prompt",
+        )
+    )
+    config = result.scalar_one_or_none()
+
+    if config:
+        # 更新已有记录
+        config.value = {"text": text}
+        flag_modified(config, "value")
+    else:
+        # 创建新记录
+        config = ProjectConfig(
+            project_id=project_id,
+            key="custom_system_prompt",
+            value={"text": text},
+        )
+        db.add(config)
+
+    await db.commit()
+
+    logger.info(
+        "项目 %s 自定义系统提示词已更新 (%d 字符)",
+        project_id, len(text),
+    )
+
+    return {"ok": True, "project_id": str(project_id), "text": text}
+
+
+# ------------------------------------------------------------------
 # 上传大纲文件
 # ------------------------------------------------------------------
 

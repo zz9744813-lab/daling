@@ -53,3 +53,6 @@ logs/
 
 # PostgreSQL data
 pgdata/
+
+# PostgreSQL data copy
+pgdata16/

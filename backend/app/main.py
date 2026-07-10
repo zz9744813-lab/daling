@@ -19,6 +19,7 @@ from app.api import (
     book_memory_router,
     brain_router,
     canon_router,
+    chat_create_router,
     cockpit_router,
     continuous_router,
     evolution_router,
@@ -96,6 +97,7 @@ def create_app() -> FastAPI:
     app.include_router(book_memory_router)
     app.include_router(planning_router)
     app.include_router(continuous_router)
+    app.include_router(chat_create_router)
 
     # ---- 健康检查 ----
     @app.get("/health", tags=["system"])

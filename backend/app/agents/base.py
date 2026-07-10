@@ -151,6 +151,8 @@ class BaseAgent:
         self.db = db
         self.project_id = project_id
         self.session_id = session_id
+        # 项目专属自定义系统提示词（类似 Gemini Gems），由 Orchestrator 注入
+        self.custom_system_prompt: str = ""
 
     # ------------------------------------------------------------------
     # Provider 配置
@@ -303,10 +305,19 @@ class BaseAgent:
         """调用 LLM 并返回 content 文本（向后兼容）。
 
         对推理模型自动合并 content + reasoning_content。
+        如果设置了 custom_system_prompt，会追加到系统提示词后面。
         """
+        # 注入项目专属自定义系统提示词
+        full_system = system_prompt
+        if self.custom_system_prompt:
+            full_system = (
+                f"{system_prompt}\n\n"
+                f"【项目专属创作指令】\n{self.custom_system_prompt}"
+            )
+
         is_reasoning = await self._get_is_reasoning()
         response = await self._llm_complete_raw(
-            system_prompt=system_prompt,
+            system_prompt=full_system,
             user_prompt=user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -356,9 +367,15 @@ class BaseAgent:
         if is_reasoning_model is None:
             is_reasoning_model = await self._get_is_reasoning()
 
+        # 注入项目专属自定义系统提示词（类似 Gemini Gems）
         full_system = system_prompt
+        if self.custom_system_prompt:
+            full_system = (
+                f"{system_prompt}\n\n"
+                f"【项目专属创作指令】\n{self.custom_system_prompt}"
+            )
         if is_reasoning_model:
-            full_system = system_prompt + JSON_OUTPUT_CONTRACT
+            full_system = full_system + JSON_OUTPUT_CONTRACT
 
         response = await self._llm_complete_raw(
             system_prompt=full_system,
