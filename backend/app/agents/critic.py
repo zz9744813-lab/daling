@@ -2,10 +2,12 @@
 
 职责：对生成的章节正文进行多维度评分与问题诊断。
 """
+
 from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -17,6 +19,48 @@ from app.domain.errors import EmptyResultError, QualityCheckError
 from app.prompts.templates.critic import CRITIC_SYSTEM, CRITIC_USER
 
 logger = logging.getLogger("app.agents.critic")
+
+_SEVERITY_ALIASES = {
+    "critical": "critical",
+    "fatal": "critical",
+    "blocker": "critical",
+    "严重": "critical",
+    "致命": "critical",
+    "high": "high",
+    "高": "high",
+    "medium": "medium",
+    "warning": "medium",
+    "warn": "medium",
+    "中": "medium",
+    "low": "low",
+    "低": "low",
+    "info": "info",
+    "提示": "info",
+}
+
+
+def _normalize_score(value: Any, fallback: float = 0.0) -> float:
+    """Coerce an arbitrary model score into the deterministic 0-100 range."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = fallback
+    if not math.isfinite(score):
+        score = fallback
+    return round(max(0.0, min(100.0, score)), 2)
+
+
+def _normalize_issue(raw_issue: Any) -> dict[str, Any]:
+    """Return a stable issue object and canonical severity."""
+    if isinstance(raw_issue, dict):
+        issue = dict(raw_issue)
+    else:
+        issue = {"description": str(raw_issue)}
+    severity = str(issue.get("severity", "medium")).strip().lower()
+    issue["severity"] = _SEVERITY_ALIASES.get(severity, "medium")
+    issue.setdefault("category", "quality")
+    issue.setdefault("description", "")
+    return issue
 
 
 class Critic(BaseAgent):
@@ -38,10 +82,29 @@ class Critic(BaseAgent):
         Returns:
             审查结果 dict，包含 scores, issues, overall_score, verdict。
         """
-        manuscript_text = "\n\n".join(
-            b["content"] for b in block_texts if b.get("content")
+        manuscript_text = "\n\n".join(b["content"] for b in block_texts if b.get("content"))
+        plan_payload = (
+            {
+                key: chapter_plan.get(key)
+                for key in (
+                    "chapter_no",
+                    "chapter_title",
+                    "overall_goal",
+                    "pov",
+                    "scene_list",
+                    "ending_hook",
+                    "_quality_repair_context",
+                )
+                if key in chapter_plan
+            }
+            if chapter_plan
+            else None
         )
-        plan_text = json.dumps(chapter_plan, ensure_ascii=False, indent=2) if chapter_plan else "（无计划）"
+        plan_text = (
+            json.dumps(plan_payload, ensure_ascii=False, indent=2)
+            if plan_payload
+            else "（无计划）"
+        )
         characters_info = await self._get_characters_info()
 
         user_prompt = CRITIC_USER.format(
@@ -59,7 +122,8 @@ class Critic(BaseAgent):
         except Exception as exc:
             logger.error(
                 "项目 %s Critic LLM 调用失败: %s",
-                self.project_id, exc,
+                self.project_id,
+                exc,
             )
             raise QualityCheckError(
                 "Critic LLM 调用失败",
@@ -77,7 +141,10 @@ class Critic(BaseAgent):
                 project_id=self.project_id,
             )
 
-        issues = result.get("issues", [])
+        raw_issues = result.get("issues", [])
+        if not isinstance(raw_issues, list):
+            raw_issues = []
+        issues = [_normalize_issue(issue) for issue in raw_issues]
         overall_score = result.get("overall_score")
         if overall_score is None:
             raise EmptyResultError(
@@ -86,25 +153,37 @@ class Critic(BaseAgent):
                 project_id=self.project_id,
             )
 
-        # verdict 推算逻辑（仅在 LLM 成功时执行）
-        verdict = result.get("verdict")
-        if not verdict:
-            has_high = any(i.get("severity") == "high" for i in issues)
-            if overall_score >= 85 and not has_high:
-                verdict = "pass"
-            elif overall_score >= 70:
-                verdict = "revise"
-            else:
-                verdict = "rewrite"
+        # LLM verdict 只是非可信建议。分数和硬规则必须在代码层重新计算，
+        # 防止模型在存在 high/critical 问题时错误地返回 pass。
+        normalized_scores = {
+            str(name): _normalize_score(value) for name, value in scores.items()
+        }
+        fallback_score = (
+            sum(normalized_scores.values()) / len(normalized_scores)
+            if normalized_scores
+            else 0.0
+        )
+        overall_score = _normalize_score(overall_score, fallback=fallback_score)
+        has_blocking = any(issue["severity"] in {"high", "critical"} for issue in issues)
+        has_medium = any(issue["severity"] == "medium" for issue in issues)
+        if has_blocking or overall_score < 70:
+            verdict = "rewrite"
+        elif has_medium or overall_score < 85:
+            verdict = "revise"
+        else:
+            verdict = "pass"
 
-        result["scores"] = scores
+        result["scores"] = normalized_scores
         result["issues"] = issues
         result["overall_score"] = overall_score
         result["verdict"] = verdict
 
         logger.info(
-            "项目 %s 章节审查完成: 总分 %d, verdict=%s, %d 个问题",
-            self.project_id, overall_score, verdict, len(issues),
+            "项目 %s 章节审查完成: 总分 %.1f, verdict=%s, %d 个问题",
+            self.project_id,
+            overall_score,
+            verdict,
+            len(issues),
         )
         return result
 

@@ -2,8 +2,10 @@
 
 导入此包即注册所有 ORM 模型到 ``Base.metadata``。
 """
+
 from app.db.models._base import TimestampMixin
 from app.db.models.annotation import Annotation
+from app.db.models.automation import ContinuousRun, ContinuousRunEvent
 from app.db.models.canon import CanonFact
 from app.db.models.chapter import Chapter, ChapterVersion, ManuscriptBlock
 from app.db.models.character import Character, Relationship
@@ -11,6 +13,14 @@ from app.db.models.memory import BookMemory, PlanningReflection
 from app.db.models.plot import CurrentStoryState, PlotThread
 from app.db.models.project import Project, ProjectConfig
 from app.db.models.provider import LlmProvider, ModelBinding
+from app.db.models.quality import (
+    HumanFeedbackEvent,
+    LearningCycle,
+    PromptVersion,
+    QualityAssessment,
+    QualityIssue,
+    RevisionAttempt,
+)
 from app.db.models.session import AgentRun, ReviewQueueItem, WorkSession
 from app.db.models.storyline import StorylineBeat, StorylineVolume
 from app.db.models.summary import ChapterSummary, NarrativeSummary
@@ -37,6 +47,16 @@ __all__ = [
     "ManuscriptBlock",
     # annotation
     "Annotation",
+    # automation
+    "ContinuousRun",
+    "ContinuousRunEvent",
+    # quality and learning ledger
+    "QualityAssessment",
+    "QualityIssue",
+    "RevisionAttempt",
+    "HumanFeedbackEvent",
+    "PromptVersion",
+    "LearningCycle",
     # character
     "Character",
     "Relationship",

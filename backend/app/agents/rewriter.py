@@ -2,6 +2,7 @@
 
 职责：按 issue 定位段落，调用 LLM 重写有问题的段落。
 """
+
 from __future__ import annotations
 
 import json
@@ -35,11 +36,34 @@ class Rewriter(BaseAgent):
         """根据审查意见重写有问题的段落（接受内容快照）。"""
         if not issues:
             return []
-        manuscript_text = "\n\n".join(
-            b["content"] for b in block_texts if b.get("content")
-        )
+        manuscript_text = "\n\n".join(b["content"] for b in block_texts if b.get("content"))
         issues_text = json.dumps(issues, ensure_ascii=False, indent=2)
-        plan_text = json.dumps(plan, ensure_ascii=False, indent=2) if plan else "（无计划）"
+        # ``plan`` also contains the full compiled long-form context. Sending
+        # that internal payload again wastes context and made reasoning models
+        # truncate the replacement manuscript. Keep only the editorial plan
+        # and the bounded repair brief.
+        plan_payload = (
+            {
+                key: plan.get(key)
+                for key in (
+                    "chapter_no",
+                    "chapter_title",
+                    "overall_goal",
+                    "pov",
+                    "scene_list",
+                    "ending_hook",
+                    "_quality_repair_context",
+                )
+                if key in plan
+            }
+            if plan
+            else None
+        )
+        plan_text = (
+            json.dumps(plan_payload, ensure_ascii=False, indent=2)
+            if plan_payload
+            else "（无计划）"
+        )
         characters_info = await self._get_characters_info()
 
         user_prompt = REWRITER_USER.format(
@@ -53,8 +77,8 @@ class Rewriter(BaseAgent):
             revised_text = await self._llm_complete(
                 system_prompt=REWRITER_SYSTEM,
                 user_prompt=user_prompt,
-                temperature=0.7,
-                max_tokens=8192,
+                temperature=0.2,
+                max_tokens=16384,
             )
         except Exception as exc:
             logger.error("项目 %s Rewriter LLM 调用失败: %s", self.project_id, exc)
@@ -78,11 +102,23 @@ class Rewriter(BaseAgent):
                 agent_name="rewriter",
                 project_id=self.project_id,
             )
+        minimum_complete_length = max(600, int(len(manuscript_text) * 0.68))
+        if len(revised_text.strip()) < minimum_complete_length:
+            raise EmptyResultError(
+                (
+                    "Rewriter 返回的完整正文疑似被截断"
+                    f"（原文 {len(manuscript_text)} 字，修订稿 {len(revised_text.strip())} 字）"
+                ),
+                agent_name="rewriter",
+                project_id=self.project_id,
+            )
 
         new_blocks = self._split_into_blocks(revised_text, chapter_id)
         logger.info(
             "项目 %s 正文修订完成: %d 个 block → %d 个 block",
-            self.project_id, len(block_texts), len(new_blocks),
+            self.project_id,
+            len(block_texts),
+            len(new_blocks),
         )
         return new_blocks
 
@@ -130,7 +166,7 @@ class Rewriter(BaseAgent):
             system_prompt=REWRITER_SYSTEM,
             user_prompt=user_prompt,
             temperature=0.7,
-            max_tokens=8192,
+            max_tokens=16384,
         )
 
         # 重新切分为 blocks
@@ -138,7 +174,9 @@ class Rewriter(BaseAgent):
 
         logger.info(
             "项目 %s 正文修订完成: %d 个 block → %d 个 block",
-            self.project_id, len(blocks), len(new_blocks),
+            self.project_id,
+            len(blocks),
+            len(new_blocks),
         )
         return new_blocks
 
@@ -158,10 +196,13 @@ class Rewriter(BaseAgent):
             if para in ("***", "---", "* * *") or para.startswith("***") or para.startswith("---"):
                 block_type = "scene_break"
                 content = ""
-            elif any(
-                marker in para
-                for marker in ['「', '」', '"', '"', '"', '"', "——", "说：", "道："]
-            ) and len(para) < 500:
+            elif (
+                any(
+                    marker in para
+                    for marker in ["「", "」", '"', '"', '"', '"', "——", "说：", "道："]
+                )
+                and len(para) < 500
+            ):
                 block_type = "dialogue"
                 content = para
             else:

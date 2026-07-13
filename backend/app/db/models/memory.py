@@ -1,11 +1,22 @@
 """记忆与规划反思模型 - book_memory / planning_reflections（v5.0 新增）。"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -16,6 +27,9 @@ class BookMemory(TimestampMixin, Base):
     """BookMemory - 作品级长期记忆条目（跨章节的累积认知）。"""
 
     __tablename__ = "book_memory"
+    __table_args__ = (
+        UniqueConstraint("project_id", "memory_type", "key", name="uq_book_memory_key"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(

@@ -1,11 +1,12 @@
 """会话与运行模型 - work_sessions / review_queue_items / agent_runs。"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -28,7 +29,11 @@ class WorkSession(TimestampMixin, Base):
     mode: Mapped[str] = mapped_column(String(10), nullable=False, default="L2")
     # planning / running / paused / completed / failed
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="planning")
-    session_type: Mapped[str] = mapped_column(String(40), nullable=False, default="advance_chapters")
+    session_type: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="advance_chapters",
+    )
 
     participants: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
 

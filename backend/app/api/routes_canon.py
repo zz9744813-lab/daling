@@ -1,4 +1,5 @@
 """设定事实路由（v5.0）- 列表 / 断言 / 确认 / 取代 / 冲突检查。"""
+
 from __future__ import annotations
 
 import uuid
@@ -17,6 +18,7 @@ router = APIRouter(prefix="/api/canon-facts", tags=["canon"])
 # ---------------------------------------------------------------------------
 # Pydantic 模型
 # ---------------------------------------------------------------------------
+
 
 class CanonFactOut(BaseModel):
     id: str
@@ -38,7 +40,10 @@ class CanonFactOut(BaseModel):
 
 
 class AssertFactRequest(BaseModel):
-    fact_type: str = Field(..., description="事实类型: setting/character/item/rule/relationship/event/location")
+    fact_type: str = Field(
+        ...,
+        description="事实类型: setting/character/item/rule/relationship/event/location",
+    )
     subject_type: str = Field(..., description="主体类型")
     subject_id: Optional[str] = Field(None, description="主体标识（通常为名称）")
     predicate: str = Field(..., description="谓词")
@@ -75,6 +80,7 @@ class ConflictInfo(BaseModel):
 # 辅助函数
 # ---------------------------------------------------------------------------
 
+
 def _to_out(fact: Any) -> CanonFactOut:
     return CanonFactOut(
         id=str(fact.id),
@@ -99,6 +105,7 @@ def _to_out(fact: Any) -> CanonFactOut:
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
+
 
 @router.get("/{project_id}", response_model=list[CanonFactOut])
 async def list_canon_facts(
@@ -211,9 +218,7 @@ async def check_conflict(
     manager = CanonManager(db, project_id)
 
     # 从文本中抽取事实
-    extracted = await manager.extract_facts_from_text(
-        payload.text, payload.chapter_no
-    )
+    extracted = await manager.extract_facts_from_text(payload.text, payload.chapter_no)
 
     # 检查每条抽取事实的冲突
     all_conflicts: list[dict] = []

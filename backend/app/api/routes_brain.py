@@ -10,6 +10,7 @@
 - ``CurrentStoryState.state`` JSON 拆分为前端各字段
 - ``StorylineVolume.volume_no`` → ``volume_index``
 """
+
 from __future__ import annotations
 
 import uuid

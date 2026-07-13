@@ -8,6 +8,7 @@
 命令意图：
     start / resume / pause / stop / rewrite / skip / modify / status / unknown
 """
+
 from __future__ import annotations
 
 import logging
@@ -21,6 +22,7 @@ from app.db.models.chapter import Chapter
 from app.db.models.session import AgentRun, ReviewQueueItem, WorkSession
 from app.pipeline.llm_client import get_llm_client
 from app.pipeline.session_manager import SessionManager, SessionNotFoundError, SessionStateError
+from app.services.continuous_production import continuous_production_service
 
 logger = logging.getLogger("app.pipeline.boss_command")
 
@@ -121,7 +123,9 @@ class BossCommandProcessor:
                     "ok": False,
                     "intent": "unknown",
                     "command": command,
-                    "message": f"无法识别指令: '{command}'。支持的指令: 继续/暂停/停止/返工/跳过/修改/查看",
+                    "message": (
+                        f"无法识别指令: '{command}'。支持的指令: 继续/暂停/停止/返工/跳过/修改/查看"
+                    ),
                     "data": {},
                 }
         except SessionNotFoundError as exc:
@@ -169,8 +173,15 @@ class BossCommandProcessor:
 
         result = resp.content.strip().lower()
         valid_intents = {
-            "start", "resume", "pause", "stop",
-            "rewrite", "skip", "modify", "status", "unknown",
+            "start",
+            "resume",
+            "pause",
+            "stop",
+            "rewrite",
+            "skip",
+            "modify",
+            "status",
+            "unknown",
         }
         if result in valid_intents:
             return result
@@ -193,15 +204,34 @@ class BossCommandProcessor:
         session_id: Optional[uuid.UUID],
         command: str,
     ) -> dict[str, Any]:
+        run = await continuous_production_service.get_status(self.project_id)
+        if run.get("run_id") and run.get("desired_state") == "running":
+            status = await continuous_production_service.pause(
+                self.project_id,
+                reason=command,
+            )
+            return {
+                "ok": True,
+                "intent": "pause",
+                "command": command,
+                "message": "24 小时自动写作已真正暂停",
+                "data": status,
+            }
+
         session = await self._resolve_session(session_id)
         if session is None:
             return {
-                "ok": False, "intent": "pause", "command": command,
-                "message": "没有活跃的会话可以暂停", "data": {},
+                "ok": False,
+                "intent": "pause",
+                "command": command,
+                "message": "没有活跃的会话可以暂停",
+                "data": {},
             }
         await self.session_manager.pause_session(session.id, reason=command)
         return {
-            "ok": True, "intent": "pause", "command": command,
+            "ok": True,
+            "intent": "pause",
+            "command": command,
             "message": f"会话 '{session.title}' 已暂停",
             "data": {"session_id": str(session.id), "status": "paused"},
         }
@@ -211,15 +241,31 @@ class BossCommandProcessor:
         session_id: Optional[uuid.UUID],
         command: str,
     ) -> dict[str, Any]:
+        run = await continuous_production_service.get_status(self.project_id)
+        if run.get("run_id") and run.get("desired_state") == "paused":
+            status = await continuous_production_service.resume(self.project_id)
+            return {
+                "ok": True,
+                "intent": "resume",
+                "command": command,
+                "message": "24 小时自动写作已恢复并重新取得运行权",
+                "data": status,
+            }
+
         session = await self._resolve_session(session_id)
         if session is None:
             return {
-                "ok": False, "intent": "resume", "command": command,
-                "message": "没有可恢复的会话", "data": {},
+                "ok": False,
+                "intent": "resume",
+                "command": command,
+                "message": "没有可恢复的会话",
+                "data": {},
             }
         await self.session_manager.resume_session(session.id)
         return {
-            "ok": True, "intent": "resume", "command": command,
+            "ok": True,
+            "intent": "resume",
+            "command": command,
             "message": f"会话 '{session.title}' 已恢复运行",
             "data": {"session_id": str(session.id), "status": "running"},
         }
@@ -229,11 +275,35 @@ class BossCommandProcessor:
         session_id: Optional[uuid.UUID],
         command: str,
     ) -> dict[str, Any]:
+        run = await continuous_production_service.get_status(self.project_id)
+        if run.get("run_id"):
+            if run.get("desired_state") == "paused":
+                status = await continuous_production_service.resume(self.project_id)
+            elif run.get("desired_state") == "stopped":
+                status = await continuous_production_service.start(
+                    self.project_id,
+                    target_chapters=run.get("target_chapters"),
+                    autonomy_level=run.get("autonomy_level", "L3"),
+                    policy=run.get("policy"),
+                )
+            else:
+                status = run
+            return {
+                "ok": True,
+                "intent": "start",
+                "command": command,
+                "message": "24 小时自动写作已启动",
+                "data": status,
+            }
+
         session = await self._resolve_session(session_id)
         if session is None:
             return {
-                "ok": False, "intent": "start", "command": command,
-                "message": "没有可启动的会话，请先创建会话", "data": {},
+                "ok": False,
+                "intent": "start",
+                "command": command,
+                "message": "没有可启动的会话，请先创建会话",
+                "data": {},
             }
         if session.status == "planning":
             await self.session_manager.start_session(session.id)
@@ -241,12 +311,16 @@ class BossCommandProcessor:
             await self.session_manager.resume_session(session.id)
         else:
             return {
-                "ok": False, "intent": "start", "command": command,
+                "ok": False,
+                "intent": "start",
+                "command": command,
                 "message": f"会话当前状态为 {session.status}，无法启动",
                 "data": {"session_id": str(session.id), "status": session.status},
             }
         return {
-            "ok": True, "intent": "start", "command": command,
+            "ok": True,
+            "intent": "start",
+            "command": command,
             "message": f"会话 '{session.title}' 已启动",
             "data": {"session_id": str(session.id), "status": "running"},
         }
@@ -256,15 +330,31 @@ class BossCommandProcessor:
         session_id: Optional[uuid.UUID],
         command: str,
     ) -> dict[str, Any]:
+        run = await continuous_production_service.get_status(self.project_id)
+        if run.get("run_id") and run.get("desired_state") != "stopped":
+            status = await continuous_production_service.stop(self.project_id)
+            return {
+                "ok": True,
+                "intent": "stop",
+                "command": command,
+                "message": "24 小时自动写作已停止，持久化任务不会自行复活",
+                "data": status,
+            }
+
         session = await self._resolve_session(session_id)
         if session is None:
             return {
-                "ok": False, "intent": "stop", "command": command,
-                "message": "没有活跃的会话可以停止", "data": {},
+                "ok": False,
+                "intent": "stop",
+                "command": command,
+                "message": "没有活跃的会话可以停止",
+                "data": {},
             }
         await self.session_manager.fail_session(session.id, error=f"用户停止: {command}")
         return {
-            "ok": True, "intent": "stop", "command": command,
+            "ok": True,
+            "intent": "stop",
+            "command": command,
             "message": f"会话 '{session.title}' 已停止",
             "data": {"session_id": str(session.id), "status": "failed"},
         }
@@ -330,7 +420,9 @@ class BossCommandProcessor:
 
         await self.db.flush()
         return {
-            "ok": True, "intent": "rewrite", "command": command,
+            "ok": True,
+            "intent": "rewrite",
+            "command": command,
             "message": f"已标记第{chapter.chapter_no}章需要返工" if chapter else "已创建返工请求",
             "data": {
                 "review_item_id": str(review_item.id),
@@ -360,7 +452,9 @@ class BossCommandProcessor:
         await self.db.flush()
 
         return {
-            "ok": True, "intent": "skip", "command": command,
+            "ok": True,
+            "intent": "skip",
+            "command": command,
             "message": "已创建跳过请求，等待确认",
             "data": {"review_item_id": str(review_item.id)},
         }
@@ -387,7 +481,9 @@ class BossCommandProcessor:
         await self.db.flush()
 
         return {
-            "ok": True, "intent": "modify", "command": command,
+            "ok": True,
+            "intent": "modify",
+            "command": command,
             "message": "已创建修改请求",
             "data": {"review_item_id": str(review_item.id)},
         }
@@ -421,12 +517,9 @@ class BossCommandProcessor:
         ]
 
         # 审批队列 pending 数量
-        stmt = (
-            select(ReviewQueueItem)
-            .where(
-                ReviewQueueItem.project_id == project_id,
-                ReviewQueueItem.status == "pending",
-            )
+        stmt = select(ReviewQueueItem).where(
+            ReviewQueueItem.project_id == project_id,
+            ReviewQueueItem.status == "pending",
         )
         result = await self.db.execute(stmt)
         pending_count = len(result.scalars().all())

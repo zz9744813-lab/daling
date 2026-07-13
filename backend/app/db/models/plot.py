@@ -1,11 +1,12 @@
 """情节线模型 - plot_threads / current_story_states。"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -30,7 +31,12 @@ class PlotThread(TimestampMixin, Base):
     introduced_chapter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     resolved_chapter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     importance: Mapped[str] = mapped_column(String(20), nullable=False, default="normal")
-    meta: Mapped[dict[str, Any]] = mapped_column(JSON, name="metadata", nullable=False, default=dict)
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        name="metadata",
+        nullable=False,
+        default=dict,
+    )
 
     def __repr__(self) -> str:
         return f"<PlotThread(name='{self.name}', type='{self.type}', status='{self.status}')>"
@@ -40,6 +46,9 @@ class CurrentStoryState(Base):
     """CurrentStoryState - 某一章结束时的故事世界快照（角色状态、情节进度等）。"""
 
     __tablename__ = "current_story_states"
+    __table_args__ = (
+        UniqueConstraint("project_id", "chapter_no", name="uq_story_state_project_no"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(

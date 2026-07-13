@@ -7,6 +7,7 @@
 
 所有状态转换均经过 ``_transition()`` 校验，保证非法转换被拒绝。
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.session import WorkSession
@@ -29,7 +30,7 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
     "planning": {"running", "failed"},
     "running": {"paused", "completed", "failed"},
     "paused": {"running", "completed", "failed"},
-    "completed": set(),   # 终态
+    "completed": set(),  # 终态
     "failed": {"running"},  # 失败后可重试
 }
 
@@ -92,9 +93,7 @@ class SessionManager:
         )
         self.db.add(session)
         await self.db.flush()
-        logger.info(
-            "创建会话 session_id=%s title='%s' mode=%s", session.id, title, mode
-        )
+        logger.info("创建会话 session_id=%s title='%s' mode=%s", session.id, title, mode)
         return session
 
     async def get_session(self, session_id: uuid.UUID) -> WorkSession:
@@ -204,11 +203,13 @@ class SessionManager:
         self._transition(session, "failed")
         if error:
             issues = list(session.blocking_issues or [])
-            issues.append({
-                "type": "fatal_error",
-                "message": error,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            issues.append(
+                {
+                    "type": "fatal_error",
+                    "message": error,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             session.blocking_issues = issues
         await self.db.flush()
         logger.error("会话 %s 已失败: %s", session_id, error)

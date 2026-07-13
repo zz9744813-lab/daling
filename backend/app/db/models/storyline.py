@@ -1,10 +1,11 @@
 """故事线模型 - storyline_volumes / storyline_beats。"""
+
 from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -15,6 +16,9 @@ class StorylineVolume(TimestampMixin, Base):
     """StorylineVolume - 故事线卷宗，将全书划分为若干卷。"""
 
     __tablename__ = "storyline_volumes"
+    __table_args__ = (
+        UniqueConstraint("project_id", "volume_no", name="uq_storyline_volume_project_no"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -34,6 +38,9 @@ class StorylineBeat(TimestampMixin, Base):
     """StorylineBeat - 故事节拍，对应单章或一段情节的叙事节点。"""
 
     __tablename__ = "storyline_beats"
+    __table_args__ = (
+        UniqueConstraint("project_id", "chapter_no", name="uq_storyline_beat_chapter"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(

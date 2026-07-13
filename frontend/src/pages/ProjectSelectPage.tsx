@@ -1,178 +1,506 @@
-import React, { useState, useRef, useEffect } from 'react'
+import { useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, Plus, Loader2, X, Upload, FileText, CheckCircle, Trash2 } from 'lucide-react'
-import { projectsApi, governanceApi } from '../api/client'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  AlertCircle,
+  ArrowRight,
+  BookOpen,
+  Clock3,
+  FileText,
+  FolderOpen,
+  Loader2,
+  MoreHorizontal,
+  Paperclip,
+  Plus,
+  Search,
+  Send,
+  Sparkles,
+  Trash2,
+  Users,
+  Wand2,
+  X,
+} from 'lucide-react'
+import { projectsApi } from '../api/client'
 import { useProjectStore } from '../store/projectStore'
 import type { Project } from '../types'
-import { Button, Input, TextArea, ProgressBar } from '../components/ui'
-import { Badge } from '../components/Badge'
-import { EmptyState } from '../components/EmptyState'
+import { Button } from '../components/ui'
+import { cn } from '../lib/cn'
 
-const GENRE_OPTIONS = [
-  '奇幻',
-  '玄幻',
-  '武侠',
-  '都市',
-  '悬疑',
-  '科幻',
-  '历史',
-  '言情',
-  '恐怖',
-  '现实',
-  '其他',
+const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024
+
+const IDEA_STARTERS = [
+  {
+    title: '从一句灵感开始',
+    description: '把零散念头梳理成可持续的长篇核心',
+    icon: Sparkles,
+    prompt: '我只有一个模糊灵感，请通过一次只问一个问题的方式帮我把它发展成小说。',
+  },
+  {
+    title: '先设计一个主角',
+    description: '从欲望、缺陷与改变弧线搭建故事',
+    icon: Users,
+    prompt: '我想先设计一个令人难忘的主角，再从他的欲望和困境发展故事。',
+  },
+  {
+    title: '构建独特世界',
+    description: '先确定世界规则、代价与核心矛盾',
+    icon: Wand2,
+    prompt: '我想从一个独特世界观开始，请帮我建立规则、代价和会持续制造剧情的矛盾。',
+  },
 ]
 
-const TONE_OPTIONS = ['严肃', '轻松', '幽默', '暗黑', '热血', '温馨', '冷峻', '诗意']
+const STATUS_LABELS: Record<string, string> = {
+  draft: '筹备中',
+  drafting: '创作中',
+  active: '创作中',
+  paused: '已暂停',
+  reviewing: '待审阅',
+  completed: '已完成',
+  error: '需处理',
+}
+
+function formatRelativeDate(value?: string) {
+  if (!value) return '刚刚'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '最近更新'
+  const diff = Date.now() - date.getTime()
+  const minutes = Math.floor(diff / 60_000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} 天前`
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+  }).format(date)
+}
+
+function projectProgress(project: Project) {
+  if (typeof project.progress === 'number') {
+    return Math.max(0, Math.min(100, project.progress))
+  }
+  const current = project.current_chapter ?? project.current_chapter_no ?? 0
+  const target = project.target_chapters ?? project.config?.target_chapters ?? 0
+  return target ? Math.round((current / target) * 100) : 0
+}
 
 export default function ProjectSelectPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const setCurrentProject = useProjectStore((s) => s.setCurrentProject)
+  const setCurrentProject = useProjectStore((state) => state.setCurrentProject)
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [prompt, setPrompt] = useState('')
+  const [attachment, setAttachment] = useState<File | null>(null)
+  const [composerError, setComposerError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
 
-  const [showCreate, setShowCreate] = useState(false)
-  const [pendingOutline, setPendingOutline] = useState<File | null>(null)
-
-  const { data: projects, isLoading } = useQuery({
+  const projectsQuery = useQuery({
     queryKey: ['projects'],
     queryFn: projectsApi.list,
   })
-
-  // 检查 Provider 是否已配置
-  const { data: providers } = useQuery({
-    queryKey: ['providers'],
-    queryFn: governanceApi.listProviders,
+  const modelStatus = useQuery({
+    queryKey: ['chat-create-status'],
+    queryFn: projectsApi.chatCreateStatus,
+    retry: 1,
+    staleTime: 15_000,
   })
 
-  const createMutation = useMutation({
-    mutationFn: async (data: any) => {
-      // 提取 AI 创作指令（不从 create 接口传，单独调 API 保存）
-      const { custom_prompt, ...projectData } = data
-      // 1. 创建项目
-      const project = await projectsApi.create(projectData)
-      // 2. 如果有上传的大纲文件，自动上传
-      if (pendingOutline && project.id) {
-        try {
-          const formData = new FormData()
-          formData.append('file', pendingOutline)
-          await fetch(`/api/projects/${project.id}/upload-outline`, {
-            method: 'POST',
-            body: formData,
-          })
-        } catch (e) {
-          console.error('大纲上传失败:', e)
-        }
-      }
-      // 3. 如果有 AI 创作指令，保存到 project_configs 表
-      if (custom_prompt && project.id) {
-        try {
-          await projectsApi.updateCustomPrompt(project.id, custom_prompt)
-        } catch (e) {
-          console.error('保存创作指令失败:', e)
-        }
-      }
-      return project
-    },
-    onSuccess: (project) => {
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-      setCurrentProject(project)
-      setPendingOutline(null)
-      navigate('/cockpit')
-    },
+  const projects = useMemo(
+    () =>
+      [...(projectsQuery.data ?? [])].sort((a, b) => {
+        const left = new Date(a.updated_at ?? a.created_at ?? 0).getTime()
+        const right = new Date(b.updated_at ?? b.created_at ?? 0).getTime()
+        return right - left
+      }),
+    [projectsQuery.data],
+  )
+
+  const filteredProjects = useMemo(() => {
+    const keyword = search.trim().toLocaleLowerCase()
+    return projects.filter((project) => {
+      const matchesSearch =
+        !keyword ||
+        project.title.toLocaleLowerCase().includes(keyword) ||
+        project.genre?.toLocaleLowerCase().includes(keyword) ||
+        project.description?.toLocaleLowerCase().includes(keyword)
+      const status = project.status || 'draft'
+      const matchesStatus = statusFilter === 'all' || status === statusFilter
+      return matchesSearch && matchesStatus
+    })
+  }, [projects, search, statusFilter])
+
+  const deleteMutation = useMutation({
+    mutationFn: (projectId: string) => projectsApi.remove(projectId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
   })
 
-  const handleOpen = (project: Project) => {
+  const openProject = (project: Project) => {
     setCurrentProject(project)
     navigate('/cockpit')
   }
 
-  // 删除项目 mutation
-  const deleteMutation = useMutation({
-    mutationFn: (projectId: string) => projectsApi.delete(projectId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
-    onError: (err: Error) => alert(`删除失败: ${err.message}`),
-  })
+  const startProject = (overridePrompt?: string) => {
+    const idea = (overridePrompt ?? prompt).trim()
+    navigate('/projects/new', {
+      state: {
+        initialPrompt: idea,
+        attachment,
+        autoSend: Boolean(idea),
+      },
+    })
+  }
 
-  const providerConfigured = (providers?.length ?? 0) > 0
+  const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      startProject()
+    }
+  }
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!/\.(docx|txt|md|markdown)$/i.test(file.name)) {
+      setComposerError('仅支持 .docx、.txt、.md 或 .markdown 文件。')
+      return
+    }
+    if (file.size > MAX_ATTACHMENT_SIZE) {
+      setComposerError('附件不能超过 5 MB。')
+      return
+    }
+    setAttachment(file)
+    setComposerError(null)
+    promptRef.current?.focus()
+  }
+
+  const modelConfigured = Boolean(modelStatus.data?.configured)
+  const greeting = projects.length > 0 ? '继续写你的故事' : '把灵感变成长篇故事'
 
   return (
-    <div className="min-h-screen bg-ink-950">
-      {/* 顶部品牌 */}
-      <header className="flex items-center gap-3 border-b border-ink-800 px-8 py-5">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-ink-800 text-gold-400">
-          <span className="font-serif text-lg font-bold">墨</span>
-        </div>
-        <div>
-          <h1 className="text-base font-medium text-gray-100">Novel Agent OS</h1>
-          <p className="text-xs text-gray-500">小说智能体操作系统</p>
-        </div>
-        <div className="ml-auto flex items-center gap-3">
-          {!providerConfigured && (
-            <Badge variant="amber">未配置 Provider</Badge>
-          )}
-          <Button variant="primary" size="md" onClick={() => setShowCreate(true)}>
-            <Plus size={16} />
-            新建项目
-          </Button>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-5xl px-8 py-10">
-        <div className="mb-6 flex items-center justify-between">
-          <h2 className="text-lg font-medium text-gray-200">我的项目</h2>
-        </div>
-
-        {isLoading ? (
-          <div className="flex items-center justify-center py-24 text-gray-500">
-            <Loader2 className="animate-spin" size={20} />
+    <div className="flex min-h-screen bg-ink-950 text-gray-100">
+      <aside className="sticky top-0 hidden h-screen w-72 shrink-0 flex-col border-r border-ink-700/80 bg-ink-900/80 px-3 py-4 backdrop-blur-xl md:flex">
+        <div className="flex items-center gap-3 px-2 pb-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-gold-500/20 bg-gold-500/10 font-serif text-lg font-semibold text-gold-400">
+            墨
           </div>
-        ) : !projects || projects.length === 0 ? (
-          <EmptyState
-            icon={<BookOpen size={28} />}
-            title="还没有项目"
-            description="创建第一个项目，开启 AI 辅助的长篇小说创作之旅。"
-            action={
-              <Button variant="primary" onClick={() => setShowCreate(true)}>
-                <Plus size={16} />
-                创建第一个项目
-              </Button>
-            }
+          <div className="min-w-0">
+            <p className="truncate font-serif text-base font-semibold text-gray-100">墨砚</p>
+            <p className="text-[11px] text-gray-500">AI 长篇小说工坊</p>
+          </div>
+        </div>
+
+        <Button
+          variant="primary"
+          size="md"
+          className="w-full justify-start bg-emerald-300 text-emerald-950 hover:bg-emerald-200"
+          onClick={() => navigate('/projects/new')}
+        >
+          <Plus size={16} />
+          新建小说
+        </Button>
+
+        <label className="relative mt-4 block">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-600"
           />
-        ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {projects.map((p) => (
-              <ProjectCard
-                key={p.id}
-                project={p}
-                onOpen={() => handleOpen(p)}
-                onDelete={() => {
-                  if (
-                    window.confirm(
-                      '确定删除该项目？所有章节和设定将被永久删除。',
-                    )
-                  ) {
-                    deleteMutation.mutate(p.id)
-                  }
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </main>
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="搜索项目"
+            className="h-9 w-full rounded-lg border border-transparent bg-ink-950 pl-9 pr-3 text-xs text-gray-200 placeholder:text-gray-600 focus:border-emerald-400/35 focus:outline-none"
+          />
+        </label>
 
-      {showCreate && (
-        <CreateProjectModal
-          onClose={() => {
-            setShowCreate(false)
-            setPendingOutline(null)
-          }}
-          onSubmit={(data) => createMutation.mutate(data)}
-          loading={createMutation.isPending}
-          error={createMutation.error?.message}
-          outlineFile={pendingOutline}
-          onOutlineChange={setPendingOutline}
-        />
-      )}
+        <div className="mt-5 flex items-center justify-between px-2">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-600">
+            最近项目
+          </span>
+          <span className="text-[10px] text-gray-600">{projects.length}</span>
+        </div>
+
+        <nav className="no-scrollbar mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto" aria-label="项目列表">
+          {projectsQuery.isLoading ? (
+            <div className="space-y-2 px-1">
+              {[0, 1, 2].map((item) => (
+                <div key={item} className="h-14 animate-pulse rounded-xl bg-ink-800" />
+              ))}
+            </div>
+          ) : projects.length === 0 ? (
+            <p className="px-2 py-6 text-center text-xs leading-5 text-gray-600">
+              你的小说会出现在这里
+            </p>
+          ) : (
+            projects.slice(0, 16).map((project) => (
+              <button
+                key={project.id}
+                type="button"
+                onClick={() => openProject(project)}
+                className="group flex w-full items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-colors hover:bg-ink-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/35"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-ink-700 bg-ink-950 text-gray-500 group-hover:text-emerald-300">
+                  <BookOpen size={14} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-medium text-gray-300 group-hover:text-gray-100">
+                    {project.title}
+                  </p>
+                  <p className="mt-0.5 truncate text-[10px] text-gray-600">
+                    {project.genre || '未分类'} · {formatRelativeDate(project.updated_at || project.created_at)}
+                  </p>
+                </div>
+              </button>
+            ))
+          )}
+        </nav>
+
+        <div className="mt-3 rounded-xl border border-ink-700 bg-ink-950/70 p-3">
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                'h-2 w-2 rounded-full',
+                modelConfigured ? 'bg-emerald-400' : 'bg-amber-400',
+              )}
+            />
+            <span className="text-xs font-medium text-gray-300">
+              {modelConfigured ? '创作模型已连接' : modelStatus.isError ? '模型状态未知' : '模型未配置'}
+            </span>
+          </div>
+          <p className="mt-1 truncate pl-4 text-[10px] text-gray-600">
+            {modelStatus.data?.model || '发送想法时会再次检测连接'}
+          </p>
+        </div>
+      </aside>
+
+      <div className="min-w-0 flex-1">
+        <header className="flex h-16 items-center gap-3 border-b border-ink-700/80 bg-ink-950/90 px-4 backdrop-blur-xl md:hidden">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-gold-500/20 bg-gold-500/10 font-serif text-base text-gold-400">
+            墨
+          </div>
+          <div>
+            <p className="font-serif text-base font-semibold text-gray-100">墨砚</p>
+            <p className="text-[10px] text-gray-600">AI 长篇小说工坊</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => navigate('/projects/new')}
+            className="ml-auto flex h-10 items-center gap-1.5 rounded-xl bg-emerald-300 px-3 text-sm font-semibold text-emerald-950"
+          >
+            <Plus size={16} /> 新建
+          </button>
+        </header>
+
+        <main className="subtle-grid min-h-[calc(100vh-4rem)] px-4 py-10 sm:px-8 md:min-h-screen md:py-14 lg:px-12">
+          <div className="mx-auto max-w-6xl">
+            <section className="mx-auto max-w-3xl text-center">
+              <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-emerald-400/15 bg-emerald-400/6 px-3 py-1.5 text-[11px] text-emerald-200">
+                <Sparkles size={13} />
+                与 AI 一起完成创意、简报与故事骨架
+              </div>
+              <h1 className="font-serif text-3xl font-semibold tracking-tight text-gray-50 sm:text-5xl">
+                {greeting}
+              </h1>
+              <p className="mx-auto mt-4 max-w-xl text-sm leading-7 text-gray-500 sm:text-base">
+                从一句想法开始，或直接上传已有大纲。系统会保留原文件，并通过自然对话整理成可编辑创作配置。
+              </p>
+
+              <div className="mx-auto mt-6 grid max-w-md grid-cols-2 gap-2 rounded-2xl border border-ink-700 bg-ink-900/70 p-1.5">
+                <button
+                  type="button"
+                  onClick={() => promptRef.current?.focus()}
+                  className={cn(
+                    'flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40',
+                    !attachment
+                      ? 'bg-emerald-300 text-emerald-950'
+                      : 'text-gray-400 hover:bg-ink-800 hover:text-gray-200',
+                  )}
+                >
+                  <Sparkles size={15} /> 从零开始
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className={cn(
+                    'flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40',
+                    attachment
+                      ? 'bg-emerald-300 text-emerald-950'
+                      : 'text-gray-400 hover:bg-ink-800 hover:text-gray-200',
+                  )}
+                >
+                  <FileText size={15} /> 上传已有大纲
+                </button>
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-ink-600 bg-ink-850/95 p-2 text-left shadow-[0_24px_80px_rgba(0,0,0,0.32)] backdrop-blur-xl focus-within:border-emerald-400/45 focus-within:ring-1 focus-within:ring-emerald-400/15">
+                {attachment && (
+                  <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-ink-700 bg-ink-900 px-3 py-2">
+                    <FileText size={15} className="text-gold-400" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-medium text-gray-200">{attachment.name}</p>
+                      <p className="text-[10px] text-gray-600">将在创建工作区中继续处理</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAttachment(null)}
+                      className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 hover:bg-ink-700 hover:text-gray-200"
+                      aria-label="移除附件"
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+                )}
+                <textarea
+                  ref={promptRef}
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  onKeyDown={handlePromptKeyDown}
+                  rows={3}
+                  placeholder="例如：一名能听见城市记忆的修复师，必须在七天内找出一场被所有人遗忘的灾难…"
+                  className="min-h-[88px] w-full resize-none bg-transparent px-3 py-3 text-sm leading-6 text-gray-100 placeholder:text-gray-600 focus:outline-none sm:text-base"
+                  aria-label="描述你想写的故事"
+                />
+                <div className="flex items-center gap-2 px-1 pb-1">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".docx,.txt,.md,.markdown"
+                    className="sr-only"
+                    onChange={handleFileChange}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex h-10 items-center gap-2 rounded-xl px-3 text-xs text-gray-400 transition-colors hover:bg-ink-700 hover:text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
+                  >
+                    <Paperclip size={16} />
+                    {attachment ? '更换大纲' : '上传大纲'}
+                  </button>
+                  <span className="hidden text-[11px] text-gray-600 sm:inline">支持 DOCX / TXT / MD，最大 5 MB</span>
+                  <button
+                    type="button"
+                    onClick={() => startProject()}
+                    disabled={!prompt.trim() && !attachment}
+                    className="ml-auto flex h-10 items-center gap-2 rounded-xl bg-emerald-300 px-4 text-sm font-semibold text-emerald-950 transition-colors hover:bg-emerald-200 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/60"
+                  >
+                    开始构思
+                    <Send size={15} />
+                  </button>
+                </div>
+              </div>
+              {composerError && (
+                <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-red-300" role="alert">
+                  <AlertCircle size={13} /> {composerError}
+                </p>
+              )}
+              <p className="mt-2 text-[10px] text-gray-600">Enter 开始 · Shift + Enter 换行</p>
+            </section>
+
+            <section className="mx-auto mt-8 grid max-w-3xl gap-3 sm:grid-cols-3" aria-label="创作起点">
+              {IDEA_STARTERS.map((starter) => {
+                const Icon = starter.icon
+                return (
+                  <button
+                    key={starter.title}
+                    type="button"
+                    onClick={() => startProject(starter.prompt)}
+                    className="group rounded-2xl border border-ink-700 bg-ink-900/55 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-emerald-400/30 hover:bg-ink-850 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/35"
+                  >
+                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink-800 text-gray-500 transition-colors group-hover:bg-emerald-400/10 group-hover:text-emerald-300">
+                      <Icon size={17} />
+                    </div>
+                    <h2 className="mt-4 text-sm font-medium text-gray-200">{starter.title}</h2>
+                    <p className="mt-1 text-xs leading-5 text-gray-600">{starter.description}</p>
+                  </button>
+                )
+              })}
+            </section>
+
+            <section className="mt-14 sm:mt-16">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-gray-600">Library</p>
+                  <h2 className="mt-1 font-serif text-2xl font-semibold text-gray-100">最近项目</h2>
+                  <p className="mt-1 text-xs text-gray-600">从上次停下的地方继续，或处理需要关注的项目。</p>
+                </div>
+                <div className="flex gap-2 md:hidden">
+                  <label className="relative min-w-0 flex-1">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" />
+                    <input
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder="搜索"
+                      className="h-10 w-full rounded-xl border border-ink-700 bg-ink-900 pl-9 pr-3 text-xs text-gray-200 focus:border-emerald-400/35 focus:outline-none"
+                    />
+                  </label>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-gray-500">
+                  <span>状态</span>
+                  <select
+                    value={statusFilter}
+                    onChange={(event) => setStatusFilter(event.target.value)}
+                    className="form-select h-9 min-w-28"
+                  >
+                    <option value="all">全部</option>
+                    <option value="draft">筹备中</option>
+                    <option value="active">创作中</option>
+                    <option value="paused">已暂停</option>
+                    <option value="reviewing">待审阅</option>
+                    <option value="completed">已完成</option>
+                  </select>
+                </label>
+              </div>
+
+              {projectsQuery.isError ? (
+                <div className="mt-6 flex flex-col items-center rounded-2xl border border-red-400/15 bg-red-400/5 px-6 py-10 text-center" role="alert">
+                  <AlertCircle size={22} className="text-red-300" />
+                  <p className="mt-3 text-sm font-medium text-gray-200">项目列表暂时无法加载</p>
+                  <p className="mt-1 text-xs text-gray-500">{(projectsQuery.error as Error).message}</p>
+                  <Button className="mt-4" size="sm" onClick={() => projectsQuery.refetch()}>
+                    重试
+                  </Button>
+                </div>
+              ) : projectsQuery.isLoading ? (
+                <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {[0, 1, 2].map((item) => (
+                    <div key={item} className="h-52 animate-pulse rounded-2xl border border-ink-700 bg-ink-900" />
+                  ))}
+                </div>
+              ) : filteredProjects.length > 0 ? (
+                <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {filteredProjects.map((project) => (
+                    <ProjectCard
+                      key={project.id}
+                      project={project}
+                      onOpen={() => openProject(project)}
+                      deleting={deleteMutation.isPending && deleteMutation.variables === project.id}
+                      onDelete={() => {
+                        if (window.confirm(`确定将《${project.title}》永久删除吗？此操作无法撤销。`)) {
+                          deleteMutation.mutate(project.id)
+                        }
+                      }}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-6 flex flex-col items-center rounded-2xl border border-dashed border-ink-700 bg-ink-900/35 px-6 py-12 text-center">
+                  {projects.length === 0 ? <FolderOpen size={25} className="text-gray-600" /> : <Search size={24} className="text-gray-600" />}
+                  <p className="mt-3 text-sm font-medium text-gray-300">
+                    {projects.length === 0 ? '还没有项目' : '没有符合条件的项目'}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-600">
+                    {projects.length === 0 ? '从上方输入一个故事想法即可开始。' : '试试其他关键词或状态筛选。'}
+                  </p>
+                </div>
+              )}
+            </section>
+          </div>
+        </main>
+      </div>
     </div>
   )
 }
@@ -181,932 +509,90 @@ function ProjectCard({
   project,
   onOpen,
   onDelete,
+  deleting,
 }: {
   project: Project
   onOpen: () => void
   onDelete: () => void
+  deleting: boolean
 }) {
-  const progress = project.progress ?? 0
-  const target = project.target_chapters ?? project.config?.target_chapters ?? 0
   const current = project.current_chapter ?? project.current_chapter_no ?? 0
+  const target = project.target_chapters ?? project.config?.target_chapters ?? 0
+  const progress = projectProgress(project)
+  const status = project.status || 'draft'
+  const statusLabel = STATUS_LABELS[status] || status
 
   return (
-    <div
-      onClick={onOpen}
-      className="group relative flex cursor-pointer flex-col rounded-lg border border-ink-700 bg-ink-850 p-5 text-left transition-colors hover:border-gold-500/40 hover:bg-ink-800"
-    >
-      {/* 删除按钮：右上角，hover 时显示并变红 */}
-      <button
-        onClick={(e) => {
-          e.stopPropagation()
-          onDelete()
-        }}
-        title="删除项目"
-        className="absolute right-3 top-3 flex h-7 w-7 items-center justify-center rounded-md text-gray-600 opacity-0 transition-all hover:bg-red-600/20 hover:text-red-400 group-hover:opacity-100"
-      >
-        <Trash2 size={15} />
-      </button>
-
-      <div className="mb-3 flex items-start justify-between pr-8">
-        <h3 className="line-clamp-2 font-serif text-base font-medium text-gray-100">
-          {project.title}
-        </h3>
-        {project.genre && <Badge variant="gold">{project.genre}</Badge>}
-      </div>
-
-      {(project.description || project.synopsis) && (
-        <p className="mb-4 line-clamp-2 flex-1 text-sm text-gray-500">
-          {project.description || project.synopsis}
-        </p>
-      )}
-
-      <div className="mt-auto space-y-2">
-        <div className="flex items-center justify-between text-xs text-gray-500">
-          <span>
-            第 {current} / {target || '—'} 章
-          </span>
-          <span>{progress}%</span>
-        </div>
-        <ProgressBar value={progress} />
-      </div>
-    </div>
-  )
-}
-
-function CreateProjectModal({
-  onClose,
-  onSubmit,
-  loading,
-  error,
-  outlineFile,
-  onOutlineChange,
-}: {
-  onClose: () => void
-  onSubmit: (data: Partial<Project> & { custom_prompt?: string }) => void
-  loading: boolean
-  error?: string
-  outlineFile: File | null
-  onOutlineChange: (file: File | null) => void
-}) {
-  // 当前步骤：1=选择来源 2=配置详情 3=确认创建
-  const [step, setStep] = useState<1 | 2 | 3>(1)
-  // 创建来源：upload=上传大纲 scratch=从零开始
-  const [source, setSource] = useState<'upload' | 'scratch' | null>(null)
-
-  // 原有表单状态
-  const [title, setTitle] = useState('')
-  const [genre, setGenre] = useState('奇幻')
-  const [themes, setThemes] = useState('')
-  const [setting, setSetting] = useState('')
-  const [tone, setTone] = useState('严肃')
-  const [lengthType, setLengthType] = useState('long')
-  // 从零开始时的创作灵感输入（对话式）
-  const [creativePrompt, setCreativePrompt] = useState('')
-  // AI 创作指令（自定义系统提示词，类似 Gemini Gems）
-  const [customPrompt, setCustomPrompt] = useState('')
-
-  // 新增配置状态
-  const [chapterWords, setChapterWords] = useState(3000) // 每章字数目标，默认3000
-  const [volumeCount, setVolumeCount] = useState<string>('auto') // 卷数偏好，默认自动
-  const [pov, setPov] = useState('第三人称限制') // 写作视角，默认第三人称限制
-  const [tense, setTense] = useState('过去时') // 叙事时态，默认过去时
-
-  // 大纲预览相关状态
-  const [outlinePreview, setOutlinePreview] = useState('') // 大纲前500字预览
-  const [outlineWordCount, setOutlineWordCount] = useState(0) // 大纲总字数
-
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // ============ 对话式创建：聊天状态 ============
-  // 聊天消息列表（user / assistant）
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([])
-  // 当前输入框内容
-  const [chatInput, setChatInput] = useState('')
-  // AI 正在回复时的加载状态
-  const [chatLoading, setChatLoading] = useState(false)
-  // 聊天列表底部锚点，用于自动滚动
-  const chatEndRef = useRef<HTMLDivElement>(null)
-
-  // 快捷标签：点击后自动发送对应消息，帮助用户快速开始对话
-  const QUICK_TAGS = [
-    '末世修仙',
-    '都市重生',
-    '星际科幻',
-    '古代言情',
-    '悬疑推理',
-    '热血少年',
-    '黑暗奇幻',
-    '轻松日常',
-  ]
-
-  // 聊天消息更新后自动滚动到底部
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chatMessages, chatLoading])
-
-  // 发送聊天消息（支持传入 overrideText 用于快捷标签直接发送）
-  const sendChatMessage = async (overrideText?: string) => {
-    const text = (overrideText ?? chatInput).trim()
-    if (!text || chatLoading) return
-    const userMsg = { role: 'user' as const, content: text }
-    const newMessages = [...chatMessages, userMsg]
-    setChatMessages(newMessages)
-    setChatInput('')
-    setChatLoading(true)
-    try {
-      const resp = await projectsApi.chatCreate(newMessages)
-      setChatMessages([...newMessages, { role: 'assistant', content: resp.reply }])
-    } catch (e) {
-      setChatMessages([
-        ...newMessages,
-        { role: 'assistant', content: '抱歉，出了一些问题。请检查是否已配置 LLM 模型。' },
-      ])
-    } finally {
-      setChatLoading(false)
-    }
-  }
-
-  // 从对话中提取项目配置，自动填充所有配置项后进入第2步
-  const generateConfigFromChat = async () => {
-    setChatLoading(true)
-    try {
-      const resp = await projectsApi.chatCreate(chatMessages, true)
-      if (resp.config) {
-        const c = resp.config
-        if (c.title) setTitle(c.title)
-        if (c.genre) setGenre(c.genre)
-        if (c.tone) setTone(c.tone)
-        if (c.themes && Array.isArray(c.themes)) setThemes(c.themes.join('、'))
-        if (c.setting) setSetting(c.setting)
-        if (c.custom_prompt) setCustomPrompt(c.custom_prompt)
-        if (c.length_type) setLengthType(c.length_type)
-        if (c.pov) setPov(c.pov)
-        if (c.tense) setTense(c.tense)
-        if (c.chapter_words) setChapterWords(c.chapter_words)
-      }
-      setStep(2) // 进入第2步
-    } catch (e) {
-      alert('配置生成失败，请手动填写')
-      setStep(2)
-    } finally {
-      setChatLoading(false)
-    }
-  }
-
-  // 篇幅预设（保留）
-  const LENGTH_PRESETS: Record<string, { label: string; min: number; max: number; words: string }> = {
-    short: { label: '短篇', min: 5, max: 30, words: '3-20万字' },
-    medium: { label: '中篇', min: 30, max: 100, words: '20-70万字' },
-    long: { label: '长篇', min: 100, max: 500, words: '70-350万字' },
-    epic: { label: '大长篇', min: 500, max: 2000, words: '350-1400万字' },
-    mega: { label: '超长篇', min: 2000, max: 5000, words: '1400-3500万字' },
-  }
-
-  // 估算章节数（取篇幅范围中间值）
-  const estimatedChapters = (() => {
-    const preset = LENGTH_PRESETS[lengthType] || LENGTH_PRESETS.long
-    return Math.round((preset.min + preset.max) / 2)
-  })()
-
-  // 文件选择处理：选文件后设置 outlineFile + 提取标题 + 读取前500字预览 + 进入第2步
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      const validExts = ['.docx', '.txt', '.md', '.markdown']
-      const ext = file.name.toLowerCase().match(/\.\w+$/)?.[0]
-      if (ext && validExts.includes(ext)) {
-        onOutlineChange(file)
-        // 自动提取标题：取文件名（去掉扩展名）
-        const baseName = file.name.replace(/\.[^.]+$/, '').trim()
-        if (baseName) {
-          setTitle(baseName)
-        }
-        // 读取前500字作为预览
-        if (ext === '.txt' || ext === '.md' || ext === '.markdown') {
-          // 文本文件可直接读取内容
-          const reader = new FileReader()
-          reader.onload = (event) => {
-            const text = event.target?.result as string
-            if (text) {
-              setOutlinePreview(text.slice(0, 500))
-              setOutlineWordCount(text.length)
-            }
-          }
-          reader.readAsText(file)
-        } else {
-          // .docx 文件无法在前端直接解析为文本，显示文件信息
-          setOutlinePreview(
-            `[DOCX 文件] ${file.name}\n文件大小：${(file.size / 1024).toFixed(1)} KB\n\n该文件需在后端解析，预览内容将在上传后生成。`,
-          )
-          setOutlineWordCount(0)
-        }
-        // 选择文件后自动设置来源为上传，并进入第2步
-        setSource('upload')
-        setStep(2)
-      } else {
-        alert('请上传 .docx / .txt / .md 格式的文件')
-      }
-    }
-  }
-
-  // 选择"从零开始"：设置来源，展开填写表单（仍停留在第1步）
-  const handleScratchSelect = () => {
-    setSource('scratch')
-  }
-
-  // 提交处理：在第3步点击"创建项目"时调用
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!title.trim()) return
-    const themesArr = themes
-      .split(/[，,、\n]/)
-      .map((t) => t.trim())
-      .filter(Boolean)
-
-    const preset = LENGTH_PRESETS[lengthType] || LENGTH_PRESETS.long
-
-    onSubmit({
-      title: title.trim(),
-      genre: genre,
-      type: genre,
-      // 后端会把 description 映射为 synopsis（别名）
-      description: setting.trim() || undefined,
-      // 目标章数取中间值，Agent 会在 min~max 范围内合理安排
-      target_chapters: Math.round((preset.min + preset.max) / 2),
-      autonomy_level: 'L2',
-      // AI 创作指令（自定义系统提示词），传给 createMutation 保存到 project_configs
-      custom_prompt: customPrompt.trim() || undefined,
-      config: {
-        target_chapters: Math.round((preset.min + preset.max) / 2),
-        length_type: lengthType,
-        length_label: preset.label,
-        chapter_range: { min: preset.min, max: preset.max },
-        estimated_words: preset.words,
-        genre: genre,
-        tone: tone,
-        autonomy_level: 'L2',
-        // 新增字段
-        chapter_words: chapterWords,
-        volume_count: volumeCount,
-        pov: pov,
-        tense: tense,
-        // 从零开始时的创作灵感文本，传给后端供 Agent 参考
-        ...(creativePrompt.trim() ? { creative_prompt: creativePrompt.trim() } : {}),
-        ...(themesArr.length > 0 ? { themes: themesArr } : {}),
-      },
-    })
-  }
-
-  // 步骤进度条配置
-  const steps = [
-    { num: 1, label: '选择来源' },
-    { num: 2, label: '配置详情' },
-    { num: 3, label: '确认创建' },
-  ] as const
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-ink-700 bg-ink-850 p-6 shadow-xl">
-        {/* 顶部标题 + 关闭按钮 */}
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-base font-medium text-gray-100">新建项目</h3>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-300">
-            <X size={18} />
+    <article className="group relative flex min-h-52 flex-col overflow-hidden rounded-2xl border border-ink-700 bg-ink-900/75 p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:border-emerald-400/25 hover:bg-ink-850 hover:shadow-[0_18px_55px_rgba(0,0,0,0.22)]">
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent" />
+      <div className="flex items-start gap-3">
+        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left focus-visible:outline-none">
+          <div className="mb-3 flex items-center gap-2 text-[10px] text-gray-600">
+            <span
+              className={cn(
+                'rounded-full border px-2 py-0.5',
+                status === 'error'
+                  ? 'border-red-400/20 bg-red-400/8 text-red-300'
+                  : status === 'active' || status === 'drafting'
+                    ? 'border-emerald-400/20 bg-emerald-400/8 text-emerald-300'
+                    : 'border-ink-600 bg-ink-950 text-gray-500',
+              )}
+            >
+              {statusLabel}
+            </span>
+            <span>{project.genre || '未分类'}</span>
+          </div>
+          <h3 className="line-clamp-2 font-serif text-xl font-semibold leading-7 text-gray-100 transition-colors group-hover:text-emerald-50">
+            {project.title}
+          </h3>
+        </button>
+        <div className="relative flex gap-1">
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={deleting}
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-600 transition-colors hover:bg-red-400/10 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/35 disabled:opacity-50"
+            aria-label={`删除《${project.title}》`}
+          >
+            {deleting ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+          </button>
+          <button
+            type="button"
+            className="hidden h-9 w-9 items-center justify-center rounded-lg text-gray-600 md:flex"
+            aria-label={`《${project.title}》更多操作`}
+            title="更多操作即将提供"
+          >
+            <MoreHorizontal size={16} />
           </button>
         </div>
-
-        {/* 步骤进度条：1/3 → 2/3 → 3/3 */}
-        <div className="mb-6 flex items-center justify-center gap-2">
-          {steps.map((s, idx) => (
-            <React.Fragment key={s.num}>
-              <div className="flex items-center gap-2">
-                <div
-                  className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium transition-colors ${
-                    step >= s.num
-                      ? 'bg-gold-500 text-ink-950'
-                      : 'bg-ink-700 text-gray-500'
-                  }`}
-                >
-                  {/* 已完成的步骤显示勾，当前及未完成显示数字 */}
-                  {step > s.num ? <CheckCircle size={14} /> : s.num}
-                </div>
-                <span
-                  className={`text-xs ${step >= s.num ? 'text-gray-200' : 'text-gray-600'}`}
-                >
-                  {s.label}
-                </span>
-              </div>
-              {/* 步骤之间的连接线 */}
-              {idx < steps.length - 1 && (
-                <div
-                  className={`h-0.5 w-12 ${step > s.num ? 'bg-gold-500' : 'bg-ink-700'}`}
-                />
-              )}
-            </React.Fragment>
-          ))}
-        </div>
-
-        {/* 错误提示 */}
-        {error && (
-          <div className="mb-4 rounded-md border border-red-600/30 bg-red-600/10 px-3 py-2 text-xs text-red-300">
-            {error}
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {/* ============ 第1步：选择来源 ============ */}
-          {step === 1 && (
-            <div className="space-y-4">
-              {!source ? (
-                // 未选择来源：显示两个大卡片二选一
-                <>
-                  <p className="text-center text-sm text-gray-400">请选择项目创建方式</p>
-                  <div className="grid grid-cols-2 gap-4">
-                    {/* 上传大纲文件卡片 */}
-                    <div>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept=".docx,.txt,.md,.markdown"
-                        onChange={handleFileSelect}
-                        className="hidden"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex h-full w-full flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-ink-600 p-6 text-center transition-colors hover:border-gold-500/40 hover:bg-ink-800/50"
-                      >
-                        <Upload size={28} className="text-gold-400" />
-                        <div>
-                          <p className="text-sm font-medium text-gray-200">上传大纲文件</p>
-                          <p className="mt-1 text-xs text-gray-500">支持 .docx / .txt / .md</p>
-                          <p className="mt-0.5 text-xs text-gray-600">AI 自动解析大纲内容</p>
-                        </div>
-                      </button>
-                    </div>
-                    {/* 从零开始卡片 */}
-                    <button
-                      type="button"
-                      onClick={handleScratchSelect}
-                      className="flex h-full w-full flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-ink-600 p-6 text-center transition-colors hover:border-gold-500/40 hover:bg-ink-800/50"
-                    >
-                      <FileText size={28} className="text-gold-400" />
-                      <div>
-                        <p className="text-sm font-medium text-gray-200">从零开始</p>
-                        <p className="mt-1 text-xs text-gray-500">手动填写类型、文风</p>
-                        <p className="mt-0.5 text-xs text-gray-600">自定义主题与篇幅</p>
-                      </div>
-                    </button>
-                  </div>
-                </>
-              ) : (
-                // 已选择"从零开始"：进入对话式聊天界面，AI 引导用户描述故事
-                <div className="space-y-3">
-                  {/* 快捷标签：点击后自动发送对应消息 */}
-                  <div className="flex flex-wrap gap-2">
-                    {QUICK_TAGS.map((tag) => (
-                      <button
-                        key={tag}
-                        type="button"
-                        disabled={chatLoading}
-                        onClick={() => sendChatMessage(tag)}
-                        className="rounded-full border border-gold-500/30 bg-gold-500/10 px-3 py-1 text-xs text-gold-300 transition-colors hover:bg-gold-500/20 disabled:opacity-50"
-                      >
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* 聊天消息列表（高度 300px，可滚动） */}
-                  <div className="h-[300px] space-y-3 overflow-y-auto rounded-lg border border-ink-700 bg-ink-900 p-3">
-                    {chatMessages.length === 0 ? (
-                      // 空对话时的欢迎提示
-                      <div className="flex h-full flex-col items-center justify-center text-center">
-                        <p className="text-sm text-gray-400">
-                          描述你想写的故事，我会帮你梳理创作思路。
-                        </p>
-                        <p className="mt-1 text-xs text-gray-600">
-                          点击上方标签快速开始，或直接输入你的想法
-                        </p>
-                      </div>
-                    ) : (
-                      chatMessages.map((msg, idx) => (
-                        <div
-                          key={idx}
-                          className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                        >
-                          {/* 用户消息右对齐金色背景，AI 消息左对齐深色背景 */}
-                          <div
-                            className={`max-w-[80%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${
-                              msg.role === 'user'
-                                ? 'bg-gold-500/20 text-gold-100'
-                                : 'bg-ink-700 text-gray-200'
-                            }`}
-                          >
-                            {msg.content}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                    {/* AI 正在输入时的"..."动画 */}
-                    {chatLoading && (
-                      <div className="flex justify-start">
-                        <div className="rounded-lg bg-ink-700 px-4 py-3 text-gray-400">
-                          <span className="animate-pulse">●●●</span>
-                        </div>
-                      </div>
-                    )}
-                    {/* 自动滚动锚点 */}
-                    <div ref={chatEndRef} />
-                  </div>
-
-                  {/* 底部输入框 + 发送按钮 */}
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        // 按 Enter 发送（Shift+Enter 换行）
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault()
-                          sendChatMessage()
-                        }
-                      }}
-                      disabled={chatLoading}
-                      placeholder="描述你想写的故事，或点击上方标签快速开始..."
-                      className="flex-1 rounded-md border border-ink-600 bg-ink-900 px-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30 disabled:opacity-50"
-                    />
-                    <Button
-                      variant="primary"
-                      type="button"
-                      size="sm"
-                      disabled={!chatInput.trim() || chatLoading}
-                      onClick={() => sendChatMessage()}
-                    >
-                      发送
-                    </Button>
-                  </div>
-
-                  {/* 生成配置按钮：对话超过 3 轮后显示（绿色高亮） */}
-                  {chatMessages.filter((m) => m.role === 'user').length >= 3 && (
-                    <button
-                      type="button"
-                      disabled={chatLoading}
-                      onClick={generateConfigFromChat}
-                      className="w-full rounded-md border border-green-500/50 bg-green-600/20 px-4 py-2.5 text-sm font-medium text-green-300 transition-colors hover:bg-green-600/30 disabled:opacity-50"
-                    >
-                      {chatLoading ? '正在生成配置...' : '生成配置'}
-                    </button>
-                  )}
-
-                  <p className="text-center text-xs text-gray-600">
-                    与 AI 对话描述你的故事，信息足够后点击"生成配置"自动填充项目参数
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ============ 第2步：大纲解析预览 + 更多配置 ============ */}
-          {step === 2 && (
-            <div className="space-y-5">
-              {/* 来源预览区：根据来源显示不同内容 */}
-              {source === 'upload' && outlineFile ? (
-                // 上传大纲：显示大纲预览 + 自动检测的标题、字数、章节数估算
-                <div className="space-y-3">
-                  <h4 className="text-xs font-medium text-gray-400">大纲解析预览</h4>
-                  {/* 文件信息 */}
-                  <div className="flex items-center gap-3 rounded-md border border-green-600/30 bg-green-600/10 px-3 py-2.5">
-                    <CheckCircle size={18} className="text-green-400" />
-                    <div className="flex-1 min-w-0">
-                      <p className="truncate text-sm text-gray-200">{outlineFile.name}</p>
-                      <p className="text-xs text-gray-500">
-                        {(outlineFile.size / 1024).toFixed(1)} KB · 已就绪
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onOutlineChange(null)
-                        setOutlinePreview('')
-                        setOutlineWordCount(0)
-                      }}
-                      className="text-gray-500 hover:text-red-400"
-                    >
-                      <X size={16} />
-                    </button>
-                  </div>
-                  {/* 大纲内容预览（前500字） */}
-                  {outlinePreview && (
-                    <div className="rounded-md border border-ink-700 bg-ink-900 p-3">
-                      <p className="mb-1 text-xs text-gray-500">大纲内容预览（前500字）</p>
-                      <p className="line-clamp-6 whitespace-pre-wrap text-xs text-gray-400">
-                        {outlinePreview}
-                      </p>
-                    </div>
-                  )}
-                  {/* 自动检测信息：标题、字数、章节数估算 */}
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="rounded-md border border-ink-700 bg-ink-900 px-3 py-2">
-                      <p className="text-xs text-gray-500">检测标题</p>
-                      <p className="truncate text-sm text-gray-200">{title || '未检测到'}</p>
-                    </div>
-                    <div className="rounded-md border border-ink-700 bg-ink-900 px-3 py-2">
-                      <p className="text-xs text-gray-500">大纲字数</p>
-                      <p className="text-sm text-gray-200">
-                        {outlineWordCount > 0 ? `${outlineWordCount} 字` : '待解析'}
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-ink-700 bg-ink-900 px-3 py-2">
-                      <p className="text-xs text-gray-500">章节数估算</p>
-                      <p className="text-sm text-gray-200">约 {estimatedChapters} 章</p>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                // 从零开始：显示系统提示词配置摘要
-                <div className="space-y-3">
-                  <h4 className="text-xs font-medium text-gray-400">AI 创作指令</h4>
-                  {customPrompt.trim() ? (
-                    <div className="rounded-md border border-gold-500/20 bg-gold-500/5 p-3">
-                      <p className="whitespace-pre-wrap text-sm text-gray-300">{customPrompt}</p>
-                      <p className="mt-2 text-right text-xs text-gray-600">{customPrompt.length} 字</p>
-                    </div>
-                  ) : (
-                    <div className="rounded-md border border-dashed border-ink-600 p-3 text-center text-xs text-gray-600">
-                      未配置系统提示词，将使用默认风格
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="rounded-md border border-ink-700 bg-ink-900 px-3 py-2">
-                      <p className="text-xs text-gray-500">篇幅</p>
-                      <p className="text-sm text-gray-200">
-                        {(LENGTH_PRESETS[lengthType] || LENGTH_PRESETS.long).label}
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-ink-700 bg-ink-900 px-3 py-2">
-                      <p className="text-xs text-gray-500">预计章数</p>
-                      <p className="text-sm text-gray-200">约 {estimatedChapters} 章</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 更多配置选项 */}
-              <div className="space-y-4 border-t border-ink-700 pt-4">
-                <h4 className="text-xs font-medium text-gray-400">更多配置</h4>
-
-                {/* 作品标题（两种来源都需要） */}
-                <div>
-                  <label className="mb-1.5 block text-xs text-gray-400">作品标题 *</label>
-                  <Input
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    placeholder="为你的小说起个名字"
-                  />
-                </div>
-
-                {/* 类型 + 文风：上传大纲时显示（可修改），从零开始时已在摘要中 */}
-                {source === 'upload' && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1.5 block text-xs text-gray-400">类型 / 题材</label>
-                      <select
-                        value={genre}
-                        onChange={(e) => setGenre(e.target.value)}
-                        className="h-9 w-full rounded-md border border-ink-600 bg-ink-900 px-3 text-sm text-gray-200 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30"
-                      >
-                        {GENRE_OPTIONS.map((g) => (
-                          <option key={g} value={g}>
-                            {g}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-xs text-gray-400">文风</label>
-                      <select
-                        value={tone}
-                        onChange={(e) => setTone(e.target.value)}
-                        className="h-9 w-full rounded-md border border-ink-600 bg-ink-900 px-3 text-sm text-gray-200 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30"
-                      >
-                        {TONE_OPTIONS.map((t) => (
-                          <option key={t} value={t}>
-                            {t}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                )}
-
-                {/* 主题：上传大纲时显示 */}
-                {source === 'upload' && (
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">
-                      主题（用逗号分隔多个主题）
-                    </label>
-                    <Input
-                      value={themes}
-                      onChange={(e) => setThemes(e.target.value)}
-                      placeholder="如：成长、复仇、救赎"
-                    />
-                  </div>
-                )}
-
-                {/* 设定 / 简介：上传大纲时显示 */}
-                {source === 'upload' && (
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">设定 / 简介</label>
-                    <TextArea
-                      value={setting}
-                      onChange={(e) => setSetting(e.target.value)}
-                      rows={3}
-                      placeholder="描述故事的世界观背景或核心设定…"
-                    />
-                  </div>
-                )}
-
-                {/* 篇幅类型：上传大纲时显示 */}
-                {source === 'upload' && (
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">篇幅类型</label>
-                    <div className="grid grid-cols-5 gap-2">
-                      {(
-                        [
-                          { key: 'short', label: '短篇', range: '5-30章' },
-                          { key: 'medium', label: '中篇', range: '30-100章' },
-                          { key: 'long', label: '长篇', range: '100-500章' },
-                          { key: 'epic', label: '大长篇', range: '500-2000章' },
-                          { key: 'mega', label: '超长篇', range: '2000-5000章' },
-                        ] as const
-                      ).map((opt) => (
-                        <button
-                          key={opt.key}
-                          type="button"
-                          onClick={() => setLengthType(opt.key)}
-                          className={`rounded-md border px-2 py-2 text-center transition-colors ${
-                            lengthType === opt.key
-                              ? 'border-gold-500/60 bg-gold-500/10 text-gold-300'
-                              : 'border-ink-600 bg-ink-900 text-gray-400 hover:border-ink-500 hover:text-gray-300'
-                          }`}
-                        >
-                          <p className="text-sm font-medium">{opt.label}</p>
-                          <p className="text-xs text-gray-600">{opt.range}</p>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 每章字数目标 + 卷数偏好 */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">每章字数目标</label>
-                    <div className="grid grid-cols-4 gap-1.5">
-                      {[2000, 3000, 4000, 5000].map((w) => (
-                        <button
-                          key={w}
-                          type="button"
-                          onClick={() => setChapterWords(w)}
-                          className={`rounded-md border px-2 py-1.5 text-xs transition-colors ${
-                            chapterWords === w
-                              ? 'border-gold-500/60 bg-gold-500/10 text-gold-300'
-                              : 'border-ink-600 bg-ink-900 text-gray-400 hover:border-ink-500 hover:text-gray-300'
-                          }`}
-                        >
-                          {w}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">卷数偏好</label>
-                    <div className="grid grid-cols-4 gap-1.5">
-                      {(
-                        [
-                          { value: 'auto', label: '自动' },
-                          { value: '1', label: '1卷' },
-                          { value: '3', label: '3卷' },
-                          { value: '5', label: '5卷' },
-                        ] as const
-                      ).map((v) => (
-                        <button
-                          key={v.value}
-                          type="button"
-                          onClick={() => setVolumeCount(v.value)}
-                          className={`rounded-md border px-2 py-1.5 text-xs transition-colors ${
-                            volumeCount === v.value
-                              ? 'border-gold-500/60 bg-gold-500/10 text-gold-300'
-                              : 'border-ink-600 bg-ink-900 text-gray-400 hover:border-ink-500 hover:text-gray-300'
-                          }`}
-                        >
-                          {v.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 写作视角 + 叙事时态 */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">写作视角</label>
-                    <select
-                      value={pov}
-                      onChange={(e) => setPov(e.target.value)}
-                      className="h-9 w-full rounded-md border border-ink-600 bg-ink-900 px-3 text-sm text-gray-200 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30"
-                    >
-                      <option value="第一人称">第一人称</option>
-                      <option value="第三人称限制">第三人称限制</option>
-                      <option value="第三人称全知">第三人称全知</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1.5 block text-xs text-gray-400">叙事时态</label>
-                    <select
-                      value={tense}
-                      onChange={(e) => setTense(e.target.value)}
-                      className="h-9 w-full rounded-md border border-ink-600 bg-ink-900 px-3 text-sm text-gray-200 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30"
-                    >
-                      <option value="过去时">过去时</option>
-                      <option value="现在时">现在时</option>
-                    </select>
-                  </div>
-                </div>
-
-                {/* AI 创作指令（自定义系统提示词，类似 Gemini Gems） */}
-                <div>
-                  <label className="mb-1.5 block text-xs text-gray-400">
-                    AI 创作指令（系统提示词）
-                  </label>
-                  <textarea
-                    value={customPrompt}
-                    onChange={(e) => setCustomPrompt(e.target.value)}
-                    rows={5}
-                    placeholder="输入你希望 AI 遵循的创作指令..."
-                    className="w-full resize-none rounded-md border border-ink-600 bg-ink-900 px-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:border-gold-500/60 focus:outline-none focus:ring-1 focus:ring-gold-500/30"
-                  />
-                  <p className="mt-1 text-xs text-gray-600">
-                    类似 Gemini Gems / Custom GPTs，定义 AI 的角色、写作风格、行为准则。例如：'你是一位擅长写热血玄幻的作家，语言风格要简洁有力，多用短句，注重动作描写，少用心理独白'
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ============ 第3步：确认创建 ============ */}
-          {step === 3 && (
-            <div className="space-y-4">
-              <h4 className="text-xs font-medium text-gray-400">请确认以下配置信息</h4>
-              <div className="space-y-3 rounded-lg border border-ink-700 bg-ink-900 p-4">
-                {/* 完整配置摘要 */}
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-                  <div>
-                    <p className="text-xs text-gray-500">作品标题</p>
-                    <p className="text-sm text-gray-200">{title || '未填写'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">创建来源</p>
-                    <p className="text-sm text-gray-200">
-                      {source === 'upload' ? '上传大纲文件' : '从零开始'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">类型 / 题材</p>
-                    <p className="text-sm text-gray-200">{genre}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">文风</p>
-                    <p className="text-sm text-gray-200">{tone}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">篇幅类型</p>
-                    <p className="text-sm text-gray-200">
-                      {(LENGTH_PRESETS[lengthType] || LENGTH_PRESETS.long).label} ·{' '}
-                      {(LENGTH_PRESETS[lengthType] || LENGTH_PRESETS.long).words}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">目标章数</p>
-                    <p className="text-sm text-gray-200">约 {estimatedChapters} 章</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">每章字数</p>
-                    <p className="text-sm text-gray-200">{chapterWords} 字</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">卷数偏好</p>
-                    <p className="text-sm text-gray-200">
-                      {volumeCount === 'auto' ? '自动' : `${volumeCount} 卷`}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">写作视角</p>
-                    <p className="text-sm text-gray-200">{pov}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">叙事时态</p>
-                    <p className="text-sm text-gray-200">{tense}</p>
-                  </div>
-                </div>
-                {/* 主题 */}
-                {themes && (
-                  <div className="border-t border-ink-700 pt-3">
-                    <p className="text-xs text-gray-500">主题</p>
-                    <p className="text-sm text-gray-200">{themes}</p>
-                  </div>
-                )}
-                {/* AI 创作指令 */}
-                {customPrompt.trim() && (
-                  <div className="border-t border-ink-700 pt-3">
-                    <p className="text-xs text-gray-500">AI 创作指令</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-400">{customPrompt}</p>
-                  </div>
-                )}
-                {/* 设定 / 简介 */}
-                {setting && (
-                  <div className="border-t border-ink-700 pt-3">
-                    <p className="text-xs text-gray-500">设定 / 简介</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-400">{setting}</p>
-                  </div>
-                )}
-                {/* 大纲文件信息（上传大纲时显示） */}
-                {source === 'upload' && outlineFile && (
-                  <div className="border-t border-ink-700 pt-3">
-                    <p className="text-xs text-gray-500">大纲文件</p>
-                    <p className="text-sm text-gray-200">{outlineFile.name}</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ============ 底部按钮区 ============ */}
-          <div className="mt-5 flex justify-between gap-2 border-t border-ink-700 pt-4">
-            {/* 左侧：上一步按钮 */}
-            <div>
-              {/* 第1步从零开始模式：上一步回到来源选择卡片 */}
-              {step === 1 && source === 'scratch' && (
-                <Button variant="ghost" type="button" onClick={() => setSource(null)}>
-                  上一步
-                </Button>
-              )}
-              {/* 第2步、第3步：返回上一步 */}
-              {step > 1 && (
-                <Button
-                  variant="ghost"
-                  type="button"
-                  onClick={() => {
-                    setStep((step - 1) as 1 | 2 | 3)
-                    // 从第2步回到第1步时，如果是上传大纲来源，重置回来源选择卡片
-                    if (step === 2 && source === 'upload') {
-                      setSource(null)
-                    }
-                  }}
-                >
-                  上一步
-                </Button>
-              )}
-            </div>
-            {/* 右侧：取消 + 下一步/创建项目 */}
-            <div className="flex gap-2">
-              <Button variant="ghost" type="button" onClick={onClose}>
-                取消
-              </Button>
-              {/* 第1步从零开始模式：下一步进入第2步 */}
-              {step === 1 && source === 'scratch' && (
-                <Button variant="primary" type="button" onClick={() => setStep(2)}>
-                  下一步
-                </Button>
-              )}
-              {/* 第2步：下一步进入第3步（需填写标题） */}
-              {step === 2 && (
-                <Button
-                  variant="primary"
-                  type="button"
-                  onClick={() => setStep(3)}
-                  disabled={!title.trim()}
-                >
-                  下一步
-                </Button>
-              )}
-              {/* 第3步：创建项目（提交表单） */}
-              {step === 3 && (
-                <Button
-                  variant="primary"
-                  type="submit"
-                  disabled={loading || !title.trim()}
-                >
-                  {loading ? <Loader2 size={14} className="animate-spin" /> : null}
-                  创建项目
-                </Button>
-              )}
-            </div>
-          </div>
-        </form>
       </div>
-    </div>
+
+      <button type="button" onClick={onOpen} className="mt-3 flex flex-1 flex-col text-left focus-visible:outline-none">
+        <p className="line-clamp-2 text-xs leading-5 text-gray-500">
+          {project.description || project.synopsis || '故事简报正在等待你继续完善。'}
+        </p>
+        <div className="mt-auto w-full pt-5">
+          <div className="flex items-center justify-between text-[11px] text-gray-600">
+            <span className="inline-flex items-center gap-1.5">
+              <BookOpen size={12} />
+              {current > 0 ? `第 ${current} 章` : '尚未开始正文'}
+              {target ? ` / ${target}` : ''}
+            </span>
+            <span>{progress}%</span>
+          </div>
+          <div className="mt-2 h-1 overflow-hidden rounded-full bg-ink-700">
+            <div className="h-full rounded-full bg-gradient-to-r from-gold-500 to-emerald-400" style={{ width: `${progress}%` }} />
+          </div>
+          <div className="mt-3 flex items-center justify-between text-[10px] text-gray-600">
+            <span className="inline-flex items-center gap-1">
+              <Clock3 size={11} /> {formatRelativeDate(project.updated_at || project.created_at)}
+            </span>
+            <span className="inline-flex items-center gap-1 text-gray-400 transition-colors group-hover:text-emerald-300">
+              {current > 0 ? '继续创作' : '完善故事骨架'} <ArrowRight size={12} />
+            </span>
+          </div>
+        </div>
+      </button>
+    </article>
   )
 }

@@ -9,17 +9,19 @@
   foreshadow       10%  — 伏笔线索
   style             5%  — 文风要求
 """
+
 from __future__ import annotations
 
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context._llm import estimate_tokens, truncate_to_tokens
+from app.context.book_memory_manager import memory_is_active, visible_memory_value
 from app.context.canon_manager import CanonManager
 from app.db.models.chapter import Chapter, ChapterVersion, ManuscriptBlock
 from app.db.models.character import Character
@@ -39,6 +41,7 @@ class CompiledContext:
     total_tokens: int
     budget_breakdown: dict[str, int] = field(default_factory=dict)
     provenance: list[dict] = field(default_factory=list)
+    prompt_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 class ContextCompiler:
@@ -56,13 +59,13 @@ class ContextCompiler:
 
     # 各区块的标签
     _LABELS: dict[str, str] = {
-        "hard_constraints": "\u3010\u786c\u7ea6\u675f\u3011",      # 【硬约束】
-        "canon_facts": "\u3010\u8bbe\u5b9a\u4e8b\u5b9e\u3011",      # 【设定事实】
+        "hard_constraints": "\u3010\u786c\u7ea6\u675f\u3011",  # 【硬约束】
+        "canon_facts": "\u3010\u8bbe\u5b9a\u4e8b\u5b9e\u3011",  # 【设定事实】
         "recent_fulltext": "\u3010\u8fd1\u671f\u6b63\u6587\u3011",  # 【近期正文】
-        "arc_summary": "\u3010\u5f27\u7ebf\u6458\u8981\u3011",      # 【弧线摘要】
-        "character_cards": "\u3010\u89d2\u8272\u5361\u3011",        # 【角色卡】
-        "foreshadow": "\u3010\u4f0f\u7b14\u7ebf\u7d22\u3011",      # 【伏笔线索】
-        "style": "\u3010\u6587\u98ce\u8981\u6c42\u3011",            # 【文风要求】
+        "arc_summary": "\u3010\u5f27\u7ebf\u6458\u8981\u3011",  # 【弧线摘要】
+        "character_cards": "\u3010\u89d2\u8272\u5361\u3011",  # 【角色卡】
+        "foreshadow": "\u3010\u4f0f\u7b14\u7ebf\u7d22\u3011",  # 【伏笔线索】
+        "style": "\u3010\u6587\u98ce\u8981\u6c42\u3011",  # 【文风要求】
     }
 
     def __init__(
@@ -83,7 +86,11 @@ class ContextCompiler:
     # ------------------------------------------------------------------
 
     async def compile(
-        self, chapter_no: int, scene_plan: dict | None = None
+        self,
+        chapter_no: int,
+        scene_plan: dict | None = None,
+        *,
+        prompt_provenance: dict[str, Any] | None = None,
     ) -> CompiledContext:
         """编译完整上下文。
 
@@ -91,9 +98,7 @@ class ContextCompiler:
         2. 逐区块采集内容并截断到预算
         3. 组装为带来源追溯的 CompiledContext
         """
-        budgets: dict[str, int] = {
-            k: int(v * self.context_window) for k, v in self.BUDGET.items()
-        }
+        budgets: dict[str, int] = {k: int(v * self.context_window) for k, v in self.BUDGET.items()}
 
         sections: dict[str, str] = {}
         breakdown: dict[str, int] = {}
@@ -104,44 +109,52 @@ class ContextCompiler:
         text = truncate_to_tokens(raw, budgets["hard_constraints"])
         sections["hard_constraints"] = text
         breakdown["hard_constraints"] = estimate_tokens(text)
-        provenance.append({
-            "type": "hard_constraints",
-            "source_id": "scene_plan",
-            "tokens": breakdown["hard_constraints"],
-        })
+        provenance.append(
+            {
+                "type": "hard_constraints",
+                "source_id": "scene_plan",
+                "tokens": breakdown["hard_constraints"],
+            }
+        )
 
         # ---- 2. Canon facts ----
         raw = await self._get_canon_facts_context(chapter_no)
         text = truncate_to_tokens(raw, budgets["canon_facts"])
         sections["canon_facts"] = text
         breakdown["canon_facts"] = estimate_tokens(text)
-        provenance.append({
-            "type": "canon_facts",
-            "source_id": "canon_facts",
-            "tokens": breakdown["canon_facts"],
-        })
+        provenance.append(
+            {
+                "type": "canon_facts",
+                "source_id": "canon_facts",
+                "tokens": breakdown["canon_facts"],
+            }
+        )
 
         # ---- 3. 近期全文 ----
         raw = await self._get_recent_fulltext(chapter_no)
         text = truncate_to_tokens(raw, budgets["recent_fulltext"])
         sections["recent_fulltext"] = text
         breakdown["recent_fulltext"] = estimate_tokens(text)
-        provenance.append({
-            "type": "recent_fulltext",
-            "source_id": "chapters",
-            "tokens": breakdown["recent_fulltext"],
-        })
+        provenance.append(
+            {
+                "type": "recent_fulltext",
+                "source_id": "chapters",
+                "tokens": breakdown["recent_fulltext"],
+            }
+        )
 
         # ---- 4. 弧线摘要 ----
         raw = await self._get_arc_summary(chapter_no)
         text = truncate_to_tokens(raw, budgets["arc_summary"])
         sections["arc_summary"] = text
         breakdown["arc_summary"] = estimate_tokens(text)
-        provenance.append({
-            "type": "arc_summary",
-            "source_id": "narrative_summaries",
-            "tokens": breakdown["arc_summary"],
-        })
+        provenance.append(
+            {
+                "type": "arc_summary",
+                "source_id": "narrative_summaries",
+                "tokens": breakdown["arc_summary"],
+            }
+        )
 
         # ---- 5. 角色卡 ----
         character_ids: list = []
@@ -151,33 +164,39 @@ class ContextCompiler:
         text = truncate_to_tokens(raw, budgets["character_cards"])
         sections["character_cards"] = text
         breakdown["character_cards"] = estimate_tokens(text)
-        provenance.append({
-            "type": "character_cards",
-            "source_id": "characters",
-            "tokens": breakdown["character_cards"],
-        })
+        provenance.append(
+            {
+                "type": "character_cards",
+                "source_id": "characters",
+                "tokens": breakdown["character_cards"],
+            }
+        )
 
         # ---- 6. 伏笔 ----
         raw = await self._get_foreshadow()
         text = truncate_to_tokens(raw, budgets["foreshadow"])
         sections["foreshadow"] = text
         breakdown["foreshadow"] = estimate_tokens(text)
-        provenance.append({
-            "type": "foreshadow",
-            "source_id": "plot_threads",
-            "tokens": breakdown["foreshadow"],
-        })
+        provenance.append(
+            {
+                "type": "foreshadow",
+                "source_id": "plot_threads",
+                "tokens": breakdown["foreshadow"],
+            }
+        )
 
         # ---- 7. 文风 ----
         raw = await self._get_style_memory()
         text = truncate_to_tokens(raw, budgets["style"])
         sections["style"] = text
         breakdown["style"] = estimate_tokens(text)
-        provenance.append({
-            "type": "style",
-            "source_id": "book_memory",
-            "tokens": breakdown["style"],
-        })
+        provenance.append(
+            {
+                "type": "style",
+                "source_id": "book_memory",
+                "tokens": breakdown["style"],
+            }
+        )
 
         # ---- 组装上下文文本 ----
         context_parts: list[str] = []
@@ -198,7 +217,8 @@ class ContextCompiler:
 
         logger.info(
             "上下文编译完成: 总计 %d tokens, 预算分配 %s",
-            total_tokens, breakdown,
+            total_tokens,
+            breakdown,
         )
 
         return CompiledContext(
@@ -207,15 +227,14 @@ class ContextCompiler:
             total_tokens=total_tokens,
             budget_breakdown=breakdown,
             provenance=provenance,
+            prompt_provenance=dict(prompt_provenance or {}),
         )
 
     # ------------------------------------------------------------------
     # 各区块采集
     # ------------------------------------------------------------------
 
-    def _get_hard_constraints(
-        self, scene_plan: dict | None, chapter_no: int
-    ) -> str:
+    def _get_hard_constraints(self, scene_plan: dict | None, chapter_no: int) -> str:
         """构建硬约束文本（字数要求、禁止内容等）。"""
         parts: list[str] = [f"当前章节：第 {chapter_no} 章"]
 
@@ -263,9 +282,7 @@ class ContextCompiler:
             )
         return "\n".join(lines)
 
-    async def _get_recent_fulltext(
-        self, chapter_no: int, count: int = 3
-    ) -> str:
+    async def _get_recent_fulltext(self, chapter_no: int, count: int = 3) -> str:
         """获取最近 N 章的正文。"""
         start_no = max(1, chapter_no - count)
         stmt = (
@@ -432,25 +449,26 @@ class ContextCompiler:
         return "\n".join(lines)
 
     async def _get_style_memory(self) -> str:
-        """获取文风记忆（从 book_memory 提取 style/tone/convention）。"""
+        """获取文风、用户偏好和已验证的跨章学习规则。"""
         stmt = select(BookMemory).where(
             BookMemory.project_id == self.project_id,
-            BookMemory.memory_type.in_(["style", "tone", "convention"]),
+            BookMemory.memory_type.in_(["style", "tone", "convention", "preference", "lesson"]),
         )
         result = await self.db.execute(stmt)
-        memories = list(result.scalars().all())
+        memories = [memory for memory in result.scalars().all() if memory_is_active(memory)]
         if not memories:
             return ""
 
         lines: list[str] = []
         for m in memories:
             value_str = ""
-            if isinstance(m.value, dict):
-                value_str = "；".join(f"{k}: {v}" for k, v in m.value.items())
-            elif isinstance(m.value, str):
-                value_str = m.value
+            value = visible_memory_value(m)
+            if isinstance(value, dict):
+                value_str = "；".join(f"{k}: {v}" for k, v in value.items())
+            elif isinstance(value, str):
+                value_str = value
             if value_str:
-                lines.append(f"- [{m.key}] {value_str}")
+                lines.append(f"- [{m.memory_type}:{m.key}] {value_str}")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

@@ -1,8 +1,9 @@
 """测试 MemoryKeeper 失败处理 — 不使用空数据更新状态。"""
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-import uuid
 
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 from app.domain.errors import AgentExecutionError, EmptyResultError
 
 
@@ -50,11 +51,13 @@ async def test_memory_keeper_empty_summary_raises_exception():
     )
 
     # mock _llm_json 返回空摘要
-    keeper._llm_json = AsyncMock(return_value={
-        "summary": "",
-        "entities_involved": [],
-        "facts_asserted": [],
-    })
+    keeper._llm_json = AsyncMock(
+        return_value={
+            "summary": "",
+            "entities_involved": [],
+            "facts_asserted": [],
+        }
+    )
 
     # mock 辅助方法
     keeper._get_characters_info = AsyncMock(return_value="角色信息")

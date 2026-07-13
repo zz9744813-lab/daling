@@ -1,8 +1,8 @@
 """应用配置 - 基于 Pydantic Settings v2 读取 .env 环境变量。"""
+
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     )
 
     # ---- 运行环境 ----
-    APP_ENV: str = Field(default="development", description="运行环境: development/staging/production")
+    APP_ENV: str = Field(
+        default="development",
+        description="运行环境: development/staging/production",
+    )
     APP_HOST: str = Field(default="0.0.0.0")
     APP_PORT: int = Field(default=8000)
 

@@ -3,6 +3,7 @@
 对指定 Agent 技能运行一组测试用例，评分并记录改进幅度，
 结果持久化到 AgentRun.result JSON 字段（agent_name="skill_lab"）。
 """
+
 from __future__ import annotations
 
 import json
@@ -106,40 +107,50 @@ class SkillLab:
 
             # 1. 调用 LLM 生成响应
             system = f"你是一个擅长 {skill_name} 的 AI 写作助手。请根据要求完成创作。"
-            resp = await self.llm.chat([
-                {"role": "system", "content": system},
-                {"role": "user", "content": case_input},
-            ])
+            resp = await self.llm.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": case_input},
+                ]
+            )
 
             total_input += resp.input_tokens
             total_output += resp.output_tokens
             total_cost += resp.cost
 
             if not resp.ok:
-                results.append({
-                    "case_index": i,
-                    "input": case_input[:200],
-                    "response": "",
-                    "score": 0.0,
-                    "error": resp.error,
-                })
+                results.append(
+                    {
+                        "case_index": i,
+                        "input": case_input[:200],
+                        "response": "",
+                        "score": 0.0,
+                        "error": resp.error,
+                        "case": case_input[:200],
+                        "output": "",
+                        "passed": False,
+                    }
+                )
                 scores.append(0.0)
                 continue
 
             # 2. 评判响应质量
-            score, reasoning = await self._evaluate(
-                case_input, resp.content, expected, criteria
-            )
+            score, reasoning = await self._evaluate(case_input, resp.content, expected, criteria)
             scores.append(score)
 
-            results.append({
-                "case_index": i,
-                "input": case_input[:200],
-                "response": resp.content[:500],
-                "score": score,
-                "reasoning": reasoning,
-                "criteria": criteria,
-            })
+            results.append(
+                {
+                    "case_index": i,
+                    "input": case_input[:200],
+                    "response": resp.content[:500],
+                    "score": score,
+                    "reasoning": reasoning,
+                    "criteria": criteria,
+                    "case": case_input[:200],
+                    "output": resp.content[:500],
+                    "passed": score >= 7,
+                }
+            )
 
         # 计算平均分与改进幅度
         avg_score = sum(scores) / len(scores) if scores else 0.0
@@ -151,6 +162,9 @@ class SkillLab:
             "skill_name": skill_name,
             "test_count": len(test_cases),
             "avg_score": round(avg_score, 2),
+            "pass_rate": round(sum(score >= 7 for score in scores) / len(scores), 4)
+            if scores
+            else 0.0,
             "previous_avg_score": previous_avg,
             "improvement": round(improvement, 2),
             "results": results,
@@ -165,7 +179,10 @@ class SkillLab:
 
         logger.info(
             "SkillLab 测试 %s 完成: skill=%s avg=%.2f improvement=%.2f",
-            test_id, skill_name, avg_score, improvement,
+            test_id,
+            skill_name,
+            avg_score,
+            improvement,
         )
         return result
 
@@ -201,17 +218,19 @@ class SkillLab:
             r = run.result or {}
             if skill_name and r.get("skill_name") != skill_name:
                 continue
-            tests.append({
-                "test_id": r.get("test_id", str(run.id)),
-                "skill_name": r.get("skill_name", "unknown"),
-                "test_count": r.get("test_count", 0),
-                "avg_score": r.get("avg_score", 0.0),
-                "improvement": r.get("improvement", 0.0),
-                "input_tokens": run.input_tokens,
-                "output_tokens": run.output_tokens,
-                "cost": run.cost,
-                "created_at": run.created_at.isoformat() if run.created_at else None,
-            })
+            tests.append(
+                {
+                    "test_id": r.get("test_id", str(run.id)),
+                    "skill_name": r.get("skill_name", "unknown"),
+                    "test_count": r.get("test_count", 0),
+                    "avg_score": r.get("avg_score", 0.0),
+                    "improvement": r.get("improvement", 0.0),
+                    "input_tokens": run.input_tokens,
+                    "output_tokens": run.output_tokens,
+                    "cost": run.cost,
+                    "created_at": run.created_at.isoformat() if run.created_at else None,
+                }
+            )
         return tests
 
     # ------------------------------------------------------------------
@@ -325,6 +344,9 @@ class SkillLab:
                     "response": "",
                     "score": 0.0,
                     "error": "LLM 未配置",
+                    "case": c.get("input", "")[:200],
+                    "output": "",
+                    "passed": False,
                 }
                 for i, c in enumerate(test_cases)
             ],
@@ -332,4 +354,5 @@ class SkillLab:
             "output_tokens": 0,
             "cost": 0.0,
             "duration_ms": 0,
+            "pass_rate": 0.0,
         }

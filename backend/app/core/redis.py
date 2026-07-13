@@ -1,4 +1,5 @@
 """Redis 连接池 - 可选组件，连接失败不阻断应用启动。"""
+
 from __future__ import annotations
 
 import logging
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 try:
     import redis.asyncio as aioredis
     from redis.asyncio.connection import ConnectionPool
+
     _REDIS_AVAILABLE = True
 except ImportError:  # pragma: no cover
     aioredis = None  # type: ignore

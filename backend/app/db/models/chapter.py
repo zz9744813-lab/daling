@@ -1,11 +1,12 @@
 """章节模型 - chapters / chapter_versions / manuscript_blocks。"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -16,6 +17,7 @@ class Chapter(TimestampMixin, Base):
     """Chapter - 一个章节的元信息与状态。"""
 
     __tablename__ = "chapters"
+    __table_args__ = (UniqueConstraint("project_id", "chapter_no", name="uq_chapter_project_no"),)
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -30,13 +32,16 @@ class Chapter(TimestampMixin, Base):
     current_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID, nullable=True)
 
     def __repr__(self) -> str:
-        return f"<Chapter(chapter_no={self.chapter_no}, title='{self.title}', status='{self.status}')>"
+        return (
+            f"<Chapter(chapter_no={self.chapter_no}, title='{self.title}', status='{self.status}')>"
+        )
 
 
 class ChapterVersion(Base):
     """ChapterVersion - 章节的某一版正文快照。"""
 
     __tablename__ = "chapter_versions"
+    __table_args__ = (UniqueConstraint("chapter_id", "version_no", name="uq_chapter_version_no"),)
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     chapter_id: Mapped[uuid.UUID] = mapped_column(
@@ -59,6 +64,7 @@ class ManuscriptBlock(Base):
     """ManuscriptBlock - 正文的分块存储，支持细粒度编辑与版本对比。"""
 
     __tablename__ = "manuscript_blocks"
+    __table_args__ = (UniqueConstraint("chapter_id", "block_no", name="uq_chapter_block_no"),)
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     chapter_id: Mapped[uuid.UUID] = mapped_column(

@@ -9,6 +9,7 @@
 
 补充前端依赖的章节 / 版本 / 运行查询路由。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,15 +18,18 @@ import logging
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.db import get_db
-from app.db.models.chapter import Chapter, ChapterVersion
+from app.db import async_session_factory, get_db
+from app.db.models.automation import ContinuousRunEvent
+from app.db.models.chapter import Chapter, ChapterVersion, ManuscriptBlock
 from app.db.models.session import AgentRun, ReviewQueueItem, WorkSession
+from app.services.continuous_production import continuous_production_service
+from app.services.quality_ledger import QualityLedger
 
 logger = logging.getLogger("app.api.cockpit")
 
@@ -74,6 +78,9 @@ class TakeoverRequest(BaseModel):
 
 class ManuscriptRequest(BaseModel):
     content: str = ""
+    base_version_number: Optional[int] = None
+    submit_for_review: bool = True
+    notes: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -322,18 +329,14 @@ async def get_cockpit(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     # 4. current_chapter：优先返回 in_progress/generating/review 状态的章节，
     #    否则返回最新章节
     chapter_stmt = (
-        select(Chapter)
-        .where(Chapter.project_id == project_id)
-        .order_by(Chapter.chapter_no.desc())
+        select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.chapter_no.desc())
     )
     chapter_result = await db.execute(chapter_stmt)
     chapters = list(chapter_result.scalars().all())
 
     current_chapter: Optional[dict[str, Any]] = None
     in_progress_statuses = {"in_progress", "generating", "review", "draft"}
-    in_progress_chapter = next(
-        (c for c in chapters if c.status in in_progress_statuses), None
-    )
+    in_progress_chapter = next((c for c in chapters if c.status in in_progress_statuses), None)
     target_chapter = in_progress_chapter or (chapters[0] if chapters else None)
     if target_chapter is not None:
         current_chapter = serialize_chapter(target_chapter)
@@ -350,20 +353,57 @@ async def get_cockpit(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 @router.get("/{project_id}/stream")
 async def stream(
     project_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    request: Request,
 ):
-    """SSE 实时事件流。
-
-    事件名匹配前端期望的 ``heartbeat``（而非 ``ping``）。
-    """
+    """推送真实持久化运行事件；heartbeat 携带 Worker 实际健康状态。"""
 
     async def event_generator():
+        seen: set[str] = set()
+        last_event_id = request.headers.get("last-event-id")
+        if last_event_id:
+            seen.add(last_event_id)
+        tick = 0
         while True:
-            yield {
-                "event": "heartbeat",
-                "data": json.dumps({"project_id": str(project_id)}),
-            }
-            await asyncio.sleep(15)
+            if await request.is_disconnected():
+                return
+            async with async_session_factory() as event_db:
+                result = await event_db.execute(
+                    select(ContinuousRunEvent)
+                    .where(ContinuousRunEvent.project_id == project_id)
+                    .order_by(ContinuousRunEvent.created_at.desc())
+                    .limit(100)
+                )
+                events = list(reversed(result.scalars().all()))
+            for item in events:
+                event_id = str(item.id)
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                yield {
+                    "id": event_id,
+                    "event": item.event_type,
+                    "data": json.dumps(
+                        {
+                            "id": event_id,
+                            "run_id": str(item.run_id),
+                            "project_id": str(project_id),
+                            "severity": item.severity,
+                            "chapter_no": item.chapter_no,
+                            "message": item.message,
+                            "data": item.data,
+                            "created_at": item.created_at.isoformat(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            if tick % 10 == 0:
+                status = await continuous_production_service.get_status(project_id)
+                yield {
+                    "event": "heartbeat",
+                    "data": json.dumps(status, ensure_ascii=False),
+                }
+            tick += 1
+            await asyncio.sleep(1)
 
     return EventSourceResponse(event_generator())
 
@@ -381,19 +421,33 @@ async def post_command(
     """
     try:
         from app.pipeline.boss_command import BossCommandProcessor
+    except ImportError as exc:
+        logger.exception("Boss 指令执行器不可用")
+        raise HTTPException(
+            status_code=503,
+            detail="指令执行器暂不可用，本次指令未执行。",
+        ) from exc
 
+    try:
         processor = BossCommandProcessor(db, project_id)
         result = await processor.process(payload.command)
-        # BossCommandProcessor 返回的字段已包含 ok/intent/command/message
-        return {
-            "ok": result.get("ok", False),
-            "intent": result.get("intent"),
-            "command": result.get("command", payload.command),
-            "message": result.get("message", ""),
-        }
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
-        logger.warning("BossCommandProcessor 不可用，降级到关键词匹配: %s", exc)
-        return _keyword_fallback(payload.command)
+        logger.exception("Boss 指令执行失败，拒绝伪装为成功: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="指令执行失败，本次操作未生效。请查看运行事件后重试。",
+        ) from exc
+
+    # 完整透传执行结果；前端据此展示真实动作，不再只显示“已接收”。
+    return {
+        "ok": result.get("ok", False),
+        "intent": result.get("intent"),
+        "command": result.get("command", payload.command),
+        "message": result.get("message", ""),
+        "data": result.get("data", {}),
+    }
 
 
 @router.post("/{project_id}/takeover")
@@ -408,6 +462,14 @@ async def takeover(
     """
     reason = payload.reason if payload and payload.reason else ""
     action = payload.action if payload else "pause"
+
+    if action == "stop":
+        run_status = await continuous_production_service.stop(project_id)
+    else:
+        run_status = await continuous_production_service.pause(
+            project_id,
+            reason=f"用户接管: {reason}" if reason else "用户接管",
+        )
 
     stmt = (
         select(WorkSession)
@@ -431,6 +493,7 @@ async def takeover(
         "project_id": str(project_id),
         "action": action,
         "message": "已接管，Agent 已暂停",
+        "continuous_run": run_status,
     }
 
 
@@ -531,7 +594,13 @@ async def save_manuscript(
     payload: ManuscriptRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """保存章节正文（创建新的 ChapterVersion 快照）。"""
+    """Save an optimistic, immutable human revision and queue real re-review."""
+    continuous = await continuous_production_service.get_status(project_id)
+    if continuous.get("desired_state") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="24 小时自动写作正在运行；请先接管或暂停后再编辑正文",
+        )
     ch_stmt = select(Chapter).where(
         Chapter.id == chapter_id,
         Chapter.project_id == project_id,
@@ -550,6 +619,19 @@ async def save_manuscript(
     )
     v_result = await db.execute(v_stmt)
     latest_version = v_result.scalar_one_or_none()
+    if (
+        payload.base_version_number is not None
+        and (latest_version.version_no if latest_version else 0) != payload.base_version_number
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "chapter_version_conflict",
+                "message": "正文已有更新，请重新载入最新版本后再保存",
+                "expected_version": payload.base_version_number,
+                "current_version": latest_version.version_no if latest_version else 0,
+            },
+        )
     next_version_no = (latest_version.version_no + 1) if latest_version else 1
 
     word_count = len(payload.content)
@@ -564,13 +646,83 @@ async def save_manuscript(
     db.add(new_version)
     await db.flush()
 
+    # Keep the working manuscript in sync with the immutable version snapshot.
+    existing_blocks = list(
+        (
+            await db.scalars(
+                select(ManuscriptBlock).where(ManuscriptBlock.chapter_id == chapter_id)
+            )
+        ).all()
+    )
+    for block in existing_blocks:
+        await db.delete(block)
+    await db.flush()
+    parts = [part.strip() for part in payload.content.split("\n\n") if part.strip()]
+    for block_no, part in enumerate(parts or [payload.content], start=1):
+        db.add(
+            ManuscriptBlock(
+                chapter_id=chapter_id,
+                block_no=block_no,
+                content=part,
+                block_type="paragraph",
+            )
+        )
+
     # 更新 chapter 当前版本与字数
     chapter.current_version_id = new_version.id
     chapter.word_count = word_count
-    chapter.status = "draft"
+    chapter.status = "review" if payload.submit_for_review else "draft"
     await db.flush()
+    feedback = await QualityLedger(db, project_id).record_feedback(
+        idempotency_key=f"manual-edit:{new_version.id}",
+        action="edit",
+        chapter_id=chapter.id,
+        version_id=new_version.id,
+        original_text=latest_version.content if latest_version else None,
+        edited_text=payload.content,
+        instruction=payload.notes,
+        extra={
+            "base_version_number": payload.base_version_number,
+            "submit_for_review": payload.submit_for_review,
+        },
+    )
+    review_item: Optional[ReviewQueueItem] = None
+    if payload.submit_for_review:
+        review_item = await db.scalar(
+            select(ReviewQueueItem).where(
+                ReviewQueueItem.project_id == project_id,
+                ReviewQueueItem.artifact_type == "chapter",
+                ReviewQueueItem.artifact_id == chapter.id,
+                ReviewQueueItem.status == "pending",
+            )
+        )
+        if review_item is None:
+            review_item = ReviewQueueItem(
+                project_id=project_id,
+                item_type="manual_edit_review",
+                artifact_type="chapter",
+                artifact_id=chapter.id,
+                chapter_no=chapter.chapter_no,
+                title=f"第 {chapter.chapter_no} 章人工修订待重新质检",
+                description=(
+                    "人工接管后的新版本已保存，请运行修改重审以执行 "
+                    "Critic、连续性检查与终审。"
+                ),
+                risk_level="medium",
+                status="pending",
+            )
+            db.add(review_item)
+            await db.flush()
 
-    return serialize_chapter_version(new_version)
+    response = serialize_chapter_version(new_version)
+    response.update(
+        {
+            "feedback_id": str(feedback.id),
+            "review_item_id": str(review_item.id) if review_item else None,
+            "submitted_for_review": payload.submit_for_review,
+        }
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

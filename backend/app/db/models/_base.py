@@ -2,6 +2,7 @@
 
 为所有 ORM 模型提供统一的 ``created_at`` / ``updated_at`` 时间戳字段。
 """
+
 from __future__ import annotations
 
 from datetime import datetime

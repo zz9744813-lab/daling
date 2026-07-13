@@ -23,6 +23,18 @@ export function BossCommandBar({ onSubmit, disabled, className }: BossCommandBar
   const [showResult, setShowResult] = useState(false)
   const project = useProjectStore((s) => s.currentProject)
   const projectId = project?.id ?? ''
+  const commandDisabled = Boolean(disabled || (!onSubmit && !projectId))
+  const quickCommands = ['启动 24H 写作', '暂停 24H 写作', '继续 24H 写作', '查看当前状态']
+  const intentLabels: Record<string, string> = {
+    start: '启动',
+    pause: '暂停',
+    resume: '继续',
+    stop: '停止',
+    rewrite: '创建返工审阅',
+    modify: '创建修改审阅',
+    skip: '创建跳过审阅',
+    status: '查询状态',
+  }
 
   const commandMutation = useMutation({
     mutationFn: (cmd: string) => cockpitApi.postCommand(projectId, cmd),
@@ -36,17 +48,21 @@ export function BossCommandBar({ onSubmit, disabled, className }: BossCommandBar
     },
   })
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    const cmd = value.trim()
-    if (!cmd || disabled) return
-
+  const dispatchCommand = (cmd: string) => {
+    const normalized = cmd.trim()
+    if (!normalized || commandDisabled) return
+    setShowResult(false)
     if (onSubmit) {
-      onSubmit(cmd)
+      onSubmit(normalized)
     } else if (projectId) {
-      commandMutation.mutate(cmd)
+      commandMutation.mutate(normalized)
     }
     setValue('')
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    dispatchCommand(value)
   }
 
   return (
@@ -64,7 +80,11 @@ export function BossCommandBar({ onSubmit, disabled, className }: BossCommandBar
           {result.ok ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
           <span className="flex-1 truncate">
             {result.message || (result.ok ? '指令已执行' : '执行失败')}
-            {result.intent && <span className="ml-1 text-gray-500">· 意图: {result.intent}</span>}
+            {result.intent && (
+              <span className="ml-1 text-gray-500">
+                · 动作: {intentLabels[result.intent] ?? result.intent}
+              </span>
+            )}
           </span>
           <button
             onClick={() => setShowResult(false)}
@@ -75,35 +95,50 @@ export function BossCommandBar({ onSubmit, disabled, className }: BossCommandBar
         </div>
       )}
 
-      <form
-        onSubmit={handleSubmit}
-        className="flex items-center gap-2 border-t border-ink-700 bg-ink-900 px-4 py-2.5"
-      >
-        <Sparkles size={16} className="shrink-0 text-gold-500" />
-        <input
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="向智能体下达指令…（例如：续写下一章、检查本章连续性、生成第 12 章大纲）"
-          disabled={disabled}
-          className="h-7 flex-1 bg-transparent text-sm text-gray-200 placeholder:text-gray-500 focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={disabled || !value.trim() || commandMutation.isPending}
-          className={cn(
-            'flex h-7 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors',
-            'bg-gold-500 text-ink-950 hover:bg-gold-400',
-            'disabled:cursor-not-allowed disabled:opacity-40',
-          )}
-        >
-          {commandMutation.isPending ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Send size={12} />
-          )}
-          执行
-        </button>
-      </form>
+      <div className="border-t border-ink-700 bg-ink-900 px-4 py-2">
+        <div className="mb-1.5 flex items-center gap-1.5 overflow-x-auto">
+          <span className="mr-1 shrink-0 text-[9px] font-semibold uppercase tracking-[.15em] text-gray-600">
+            24H 快捷控制
+          </span>
+          {quickCommands.map((command) => (
+            <button
+              key={command}
+              type="button"
+              disabled={commandDisabled || commandMutation.isPending}
+              onClick={() => dispatchCommand(command)}
+              className="shrink-0 rounded-md border border-ink-600 px-2 py-0.5 text-[10px] text-gray-400 transition-colors hover:border-gold-500/40 hover:text-gold-300 disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              {command}
+            </button>
+          ))}
+        </div>
+        <form onSubmit={handleSubmit} className="flex items-center gap-2">
+          <Sparkles size={16} className="shrink-0 text-gold-500" />
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="输入可执行指令：启动、暂停、继续、停止、查看状态；返工/修改会进入审阅队列"
+            disabled={commandDisabled}
+            className="h-7 flex-1 bg-transparent text-sm text-gray-200 placeholder:text-gray-500 focus:outline-none"
+          />
+          <button
+            type="submit"
+            disabled={commandDisabled || !value.trim() || commandMutation.isPending}
+            className={cn(
+              'flex h-7 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors',
+              'bg-gold-500 text-ink-950 hover:bg-gold-400',
+              'disabled:cursor-not-allowed disabled:opacity-40',
+            )}
+          >
+            {commandMutation.isPending ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Send size={12} />
+            )}
+            执行
+          </button>
+        </form>
+      </div>
     </div>
   )
 }

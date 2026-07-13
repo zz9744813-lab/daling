@@ -6,10 +6,12 @@
 - 文风提取（extract_style_from_chapters）— 从已完成章节分析文风并存入 book_memory
 - 文风提示词（get_style_prompt）— 将文风记忆组装为提示词
 """
+
 from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -20,6 +22,36 @@ from app.db.models.chapter import Chapter, ChapterVersion, ManuscriptBlock
 from app.db.models.memory import BookMemory
 
 logger = logging.getLogger("app.context.book_memory")
+
+MEMORY_ACTIVE_STATUSES = {"active", "approved"}
+
+
+def memory_governance(memory: BookMemory) -> dict[str, Any]:
+    """Read governance metadata while treating legacy entries as active."""
+    value = memory.value if isinstance(memory.value, dict) else {}
+    governance = value.get("_governance", {})
+    if not isinstance(governance, dict):
+        governance = {}
+    return {
+        "status": str(governance.get("status") or "active"),
+        "origin": str(governance.get("origin") or "legacy"),
+        "reviewed_by": governance.get("reviewed_by"),
+        "reviewed_at": governance.get("reviewed_at"),
+        "reason": governance.get("reason"),
+        "history": list(governance.get("history") or []),
+    }
+
+
+def memory_is_active(memory: BookMemory) -> bool:
+    return memory_governance(memory)["status"] in MEMORY_ACTIVE_STATUSES
+
+
+def visible_memory_value(memory: BookMemory) -> dict[str, Any]:
+    """Return content without leaking internal governance keys into prompts/UI."""
+    value = memory.value
+    if not isinstance(value, dict):
+        return {"text": str(value)}
+    return {key: item for key, item in value.items() if key != "_governance"}
 
 
 class BookMemoryManager:
@@ -33,9 +65,7 @@ class BookMemoryManager:
     # 记忆查询
     # ------------------------------------------------------------------
 
-    async def get_memory(
-        self, memory_type: Optional[str] = None
-    ) -> list[BookMemory]:
+    async def get_memory(self, memory_type: Optional[str] = None) -> list[BookMemory]:
         """查询作品记忆，可按 memory_type 过滤。"""
         stmt = select(BookMemory).where(
             BookMemory.project_id == self.project_id,
@@ -67,6 +97,17 @@ class BookMemoryManager:
         """
         if isinstance(value, str):
             value = {"text": value}
+        value = {
+            **value,
+            "_governance": {
+                "status": "active",
+                "origin": "manual",
+                "reviewed_by": "user",
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "用户直接创建",
+                "history": [],
+            },
+        }
 
         memory = BookMemory(
             project_id=self.project_id,
@@ -81,13 +122,58 @@ class BookMemoryManager:
         await self.db.refresh(memory)
         return memory
 
+    async def review_memory(
+        self,
+        memory_id: uuid.UUID,
+        *,
+        action: str,
+        actor: str = "user",
+        reason: Optional[str] = None,
+    ) -> BookMemory:
+        """Approve, reject, or roll back a memory with an append-only audit trail."""
+        if action not in {"approve", "reject", "rollback"}:
+            raise ValueError("不支持的记忆治理动作")
+        memory = await self.db.get(BookMemory, memory_id)
+        if memory is None or memory.project_id != self.project_id:
+            raise LookupError("记忆条目不存在")
+
+        now = datetime.now(timezone.utc).isoformat()
+        current = memory_governance(memory)
+        next_status = {
+            "approve": "active",
+            "reject": "rejected",
+            "rollback": "rolled_back",
+        }[action]
+        history = list(current.get("history") or [])[-49:]
+        history.append(
+            {
+                "action": action,
+                "from_status": current["status"],
+                "to_status": next_status,
+                "actor": actor,
+                "reason": reason,
+                "at": now,
+            }
+        )
+        value = visible_memory_value(memory)
+        value["_governance"] = {
+            "status": next_status,
+            "origin": current["origin"],
+            "reviewed_by": actor,
+            "reviewed_at": now,
+            "reason": reason,
+            "history": history,
+        }
+        memory.value = value
+        await self.db.flush()
+        await self.db.refresh(memory)
+        return memory
+
     # ------------------------------------------------------------------
     # 文风提取
     # ------------------------------------------------------------------
 
-    async def extract_style_from_chapters(
-        self, chapter_count: int = 5
-    ) -> dict[str, Any]:
+    async def extract_style_from_chapters(self, chapter_count: int = 5) -> dict[str, Any]:
         """从已完成章节提取文风特征。
 
         分析已完成章节的文风，存入 book_memory。
@@ -118,9 +204,7 @@ class BookMemoryManager:
         for ch in chapters:
             content = await self._get_chapter_content(ch)
             if content:
-                text_parts.append(
-                    f"--- 第{ch.chapter_no}章 {ch.title} ---\n{content[:2000]}"
-                )
+                text_parts.append(f"--- 第{ch.chapter_no}章 {ch.title} ---\n{content[:2000]}")
 
         if not text_parts:
             return {}
@@ -191,7 +275,11 @@ class BookMemoryManager:
 
         查询 book_memory 中的 style/tone/convention 记忆，组装为提示词文本。
         """
-        memories = await self.get_memory(memory_type="style")
+        memories = [
+            memory
+            for memory in await self.get_memory(memory_type="style")
+            if memory_is_active(memory)
+        ]
         if not memories:
             return ""
 
@@ -210,16 +298,17 @@ class BookMemoryManager:
 
         lines: list[str] = []
         for m in memories:
-            if isinstance(m.value, dict):
+            value = visible_memory_value(m)
+            if isinstance(value, dict):
                 parts: list[str] = []
-                for k, v in m.value.items():
+                for k, v in value.items():
                     if v:
                         label = field_labels.get(k, k)
                         parts.append(f"{label}：{v}")
                 if parts:
                     lines.append(f"[{m.key}] " + "；".join(parts))
-            elif isinstance(m.value, str):
-                lines.append(f"[{m.key}] {m.value}")
+            elif isinstance(value, str):
+                lines.append(f"[{m.key}] {value}")
 
         return "\n".join(lines)
 
@@ -242,3 +331,12 @@ class BookMemoryManager:
         result = await self.db.execute(blk_stmt)
         blocks = list(result.scalars().all())
         return "\n".join(b.content for b in blocks if b.content)
+
+
+__all__ = [
+    "BookMemoryManager",
+    "MEMORY_ACTIVE_STATUSES",
+    "memory_governance",
+    "memory_is_active",
+    "visible_memory_value",
+]

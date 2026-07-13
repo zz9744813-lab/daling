@@ -2,6 +2,7 @@
 
 所有业务异常继承自 ``AppError``，便于统一异常处理中间件捕获。
 """
+
 from __future__ import annotations
 
 
@@ -11,7 +12,13 @@ class AppError(Exception):
     status_code: int = 500
     error_code: str = "app_error"
 
-    def __init__(self, message: str = "", *, error_code: str | None = None, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        error_code: str | None = None,
+        status_code: int | None = None,
+    ):
         super().__init__(message or self.error_code)
         self.message = message or self.error_code
         if error_code is not None:

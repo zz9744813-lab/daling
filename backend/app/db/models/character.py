@@ -1,10 +1,11 @@
 """角色模型 - characters / relationships。"""
+
 from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base

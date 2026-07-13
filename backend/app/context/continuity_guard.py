@@ -6,6 +6,7 @@
   Step 3: 与 evolving facts 比对 — 冲突可自动取代（can_auto_supersede=True）
   Step 4: 时间线校验 — 检查角色死亡后出场、物品销毁后使用等时序问题
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,8 +39,16 @@ class ContinuityGuard:
 
     # 终态谓词集合 — 表示主体进入不可逆状态
     _TERMINAL_PREDICATES: set[str] = {
-        "死亡", "销毁", "消失", "离开", "被捕", "阵亡", "牺牲",
-        "陨落", "毁灭", "封印",
+        "死亡",
+        "销毁",
+        "消失",
+        "离开",
+        "被捕",
+        "阵亡",
+        "牺牲",
+        "陨落",
+        "毁灭",
+        "封印",
     }
 
     def __init__(
@@ -89,16 +98,17 @@ class ContinuityGuard:
             immutable_conflicts=immutable_conflicts,
             evolving_conflicts=evolving_conflicts,
             timeline_issues=timeline_issues,
-            can_auto_supersede=(
-                len(immutable_conflicts) == 0 and len(evolving_conflicts) > 0
-            ),
+            can_auto_supersede=(len(immutable_conflicts) == 0 and len(evolving_conflicts) > 0),
         )
 
         logger.info(
             "连续性校验完成 (第%d章): passed=%s, 抽取事实=%d, "
             "immutable冲突=%d, evolving冲突=%d, 时间线问题=%d",
-            chapter_no, passed, len(extracted_facts),
-            len(immutable_conflicts), len(evolving_conflicts),
+            chapter_no,
+            passed,
+            len(extracted_facts),
+            len(immutable_conflicts),
+            len(evolving_conflicts),
             len(timeline_issues),
         )
 
@@ -108,9 +118,7 @@ class ContinuityGuard:
     # Step 1: 事实抽取
     # ------------------------------------------------------------------
 
-    async def _extract_facts(
-        self, blocks: list, chapter_no: int
-    ) -> list[dict]:
+    async def _extract_facts(self, blocks: list, chapter_no: int) -> list[dict]:
         """Step 1: 用 LLM 从正文抽取事实断言。
 
         blocks 可以是 ManuscriptBlock 对象、dict 或 str。
@@ -153,16 +161,18 @@ class ContinuityGuard:
             for ef in immutable_facts:
                 if self._is_same_subject_and_predicate(fact, ef):
                     if ef.object_value != fact.get("object_value", ""):
-                        conflicts.append({
-                            "extracted_fact": fact,
-                            "conflicting_fact": self._fact_to_dict(ef),
-                            "conflict_type": "immutable",
-                            "message": (
-                                f"不可变设定冲突：{ef.subject_type}:{ef.subject_id or ''} 的 "
-                                f"{ef.predicate} 已设定为 '{ef.object_value}'，"
-                                f"但正文尝试改为 '{fact.get('object_value')}'"
-                            ),
-                        })
+                        conflicts.append(
+                            {
+                                "extracted_fact": fact,
+                                "conflicting_fact": self._fact_to_dict(ef),
+                                "conflict_type": "immutable",
+                                "message": (
+                                    f"不可变设定冲突：{ef.subject_type}:{ef.subject_id or ''} 的 "
+                                    f"{ef.predicate} 已设定为 '{ef.object_value}'，"
+                                    f"但正文尝试改为 '{fact.get('object_value')}'"
+                                ),
+                            }
+                        )
         return conflicts
 
     # ------------------------------------------------------------------
@@ -186,25 +196,25 @@ class ContinuityGuard:
             for ef in evolving_facts:
                 if self._is_same_subject_and_predicate(fact, ef):
                     if ef.object_value != fact.get("object_value", ""):
-                        conflicts.append({
-                            "extracted_fact": fact,
-                            "conflicting_fact": self._fact_to_dict(ef),
-                            "conflict_type": "evolving",
-                            "message": (
-                                f"可演进设定变化：{ef.subject_type}:{ef.subject_id or ''} 的 "
-                                f"{ef.predicate} 从 '{ef.object_value}' "
-                                f"变为 '{fact.get('object_value')}'"
-                            ),
-                        })
+                        conflicts.append(
+                            {
+                                "extracted_fact": fact,
+                                "conflicting_fact": self._fact_to_dict(ef),
+                                "conflict_type": "evolving",
+                                "message": (
+                                    f"可演进设定变化：{ef.subject_type}:{ef.subject_id or ''} 的 "
+                                    f"{ef.predicate} 从 '{ef.object_value}' "
+                                    f"变为 '{fact.get('object_value')}'"
+                                ),
+                            }
+                        )
         return conflicts
 
     # ------------------------------------------------------------------
     # Step 4: 时间线校验
     # ------------------------------------------------------------------
 
-    async def _check_timeline(
-        self, facts: list[dict], chapter_no: int
-    ) -> list[dict]:
+    async def _check_timeline(self, facts: list[dict], chapter_no: int) -> list[dict]:
         """Step 4: 时间线校验。
 
         检查事实的时序合理性，如角色在死亡后出场、物品在被销毁后使用。
@@ -226,13 +236,10 @@ class ContinuityGuard:
                 key = f"{ef.subject_type}:{ef.subject_id or ''}"
                 # 保留最早的终态事实
                 existing = terminal_facts.get(key)
-                if (
-                    existing is None
-                    or (
-                        ef.source_chapter_no is not None
-                        and existing.source_chapter_no is not None
-                        and ef.source_chapter_no < existing.source_chapter_no
-                    )
+                if existing is None or (
+                    ef.source_chapter_no is not None
+                    and existing.source_chapter_no is not None
+                    and ef.source_chapter_no < existing.source_chapter_no
                 ):
                     terminal_facts[key] = ef
 
@@ -250,25 +257,28 @@ class ContinuityGuard:
 
             # 如果抽取的事实不是终态谓词，说明主体在终态后仍有活动
             if not self._is_terminal_predicate(fact.get("predicate", "")):
-                issues.append({
-                    "extracted_fact": fact,
-                    "terminal_fact": {
-                        "id": str(terminal.id),
-                        "fact_type": terminal.fact_type,
-                        "subject_type": terminal.subject_type,
-                        "subject_id": terminal.subject_id,
-                        "predicate": terminal.predicate,
-                        "object_value": terminal.object_value,
-                        "source_chapter_no": terminal.source_chapter_no,
-                    },
-                    "conflict_type": "timeline",
-                    "message": (
-                        f"时间线问题：{fact.get('subject_type')}:{fact.get('subject_id') or ''} "
-                        f"在第{terminal_chapter}章已{terminal.predicate}"
-                        f"（{terminal.object_value}），但在第{chapter_no}章的"
-                        f"正文中有相关活动（{fact.get('predicate')}）"
-                    ),
-                })
+                issues.append(
+                    {
+                        "extracted_fact": fact,
+                        "terminal_fact": {
+                            "id": str(terminal.id),
+                            "fact_type": terminal.fact_type,
+                            "subject_type": terminal.subject_type,
+                            "subject_id": terminal.subject_id,
+                            "predicate": terminal.predicate,
+                            "object_value": terminal.object_value,
+                            "source_chapter_no": terminal.source_chapter_no,
+                        },
+                        "conflict_type": "timeline",
+                        "message": (
+                            f"时间线问题：{fact.get('subject_type')}:"
+                            f"{fact.get('subject_id') or ''} "
+                            f"在第{terminal_chapter}章已{terminal.predicate}"
+                            f"（{terminal.object_value}），但在第{chapter_no}章的"
+                            f"正文中有相关活动（{fact.get('predicate')}）"
+                        ),
+                    }
+                )
 
         return issues
 
@@ -277,9 +287,7 @@ class ContinuityGuard:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_same_subject_and_predicate(
-        fact: dict, ef: CanonFact
-    ) -> bool:
+    def _is_same_subject_and_predicate(fact: dict, ef: CanonFact) -> bool:
         """判断抽取事实与 canon 事实是否同 subject + predicate。"""
         return (
             ef.subject_type == fact.get("subject_type")

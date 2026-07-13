@@ -1,6 +1,43 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { cockpitApi } from '../api/client'
-import type { AgentRole, AgentStatus, SSEEvent, SSEEventType } from '../types'
+import type {
+  AgentRole,
+  AgentStatus,
+  ContinuousStatus,
+  KnownSSEEventType,
+  SSEEvent,
+  SSEEventType,
+} from '../types'
+
+const CONTINUOUS_EVENT_TYPES: KnownSSEEventType[] = [
+  'run_started',
+  'policy_updated',
+  'run_paused',
+  'run_resumed',
+  'run_stopped',
+  'run_recovering',
+  'worker_acquired',
+  'worker_shutdown',
+  'target_reached',
+  'story_structure_extended',
+  'chapter_completed',
+  'quality_hold',
+  'budget_hold',
+  'circuit_open',
+  'retry_scheduled',
+  'supervisor_failed',
+]
+
+const REGISTERED_EVENT_TYPES: KnownSSEEventType[] = [
+  'agent_start',
+  'agent_complete',
+  'chapter_progress',
+  'review_needed',
+  'error',
+  'heartbeat',
+  ...CONTINUOUS_EVENT_TYPES,
+]
 
 interface UseCockpitStreamResult {
   /** SSE 连接状态 */
@@ -25,6 +62,7 @@ interface UseCockpitStreamResult {
  * - agent_complete:   Agent 完成 → 状态置为 idle
  * - chapter_progress: 章节内容增量 → 拼接到 streamingContent
  * - review_needed:    需要人工审阅
+ * - chapter_completed / quality_hold / budget_hold / retry_scheduled: 持久化生产事件
  * - error:            错误事件
  * - heartbeat:        心跳保活
  */
@@ -32,6 +70,7 @@ export function useCockpitStream(
   projectId: string | undefined,
   initialStatuses?: AgentStatus[],
 ): UseCockpitStreamResult {
+  const queryClient = useQueryClient()
   const [connected, setConnected] = useState(false)
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatus>>({})
   const [streamingContent, setStreamingContent] = useState('')
@@ -57,6 +96,54 @@ export function useCockpitStream(
       setAgentStatuses(map)
     }
   }, [initialStatuses])
+
+  const syncQueriesForEvent = useCallback(
+    (type: SSEEventType, data: Record<string, unknown>) => {
+      if (!projectId) return
+
+      if (type === 'heartbeat') {
+        // 新版 heartbeat 本身就是完整 ContinuousStatus。直接写入缓存，既能
+        // 保持 1 秒级心跳，又不会每秒制造一轮 HTTP 轮询。
+        if (data.run_id !== undefined && data.status && data.project_id) {
+          queryClient.setQueryData(
+            ['continuous-status', projectId],
+            data as unknown as ContinuousStatus,
+          )
+        }
+        return
+      }
+
+      if (!CONTINUOUS_EVENT_TYPES.includes(type as KnownSSEEventType)) return
+
+      void queryClient.invalidateQueries({ queryKey: ['continuous-status', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['continuous-events', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['cockpit', projectId] })
+
+      if (
+        type === 'chapter_completed' ||
+        type === 'quality_hold' ||
+        type === 'story_structure_extended'
+      ) {
+        void queryClient.invalidateQueries({ queryKey: ['chapters', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['chapter-version', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['review-chapter', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['review-chapter-version', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['review-queue-pending', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['evolution-overview', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['brain-overview', projectId] })
+      }
+
+      if (type === 'story_structure_extended') {
+        void queryClient.invalidateQueries({ queryKey: ['preparation-status', projectId] })
+        void queryClient.invalidateQueries({ queryKey: ['storyline', projectId] })
+      }
+
+      if (type === 'budget_hold' || type === 'chapter_completed') {
+        void queryClient.invalidateQueries({ queryKey: ['usage', projectId] })
+      }
+    },
+    [projectId, queryClient],
+  )
 
   const connect = useCallback(() => {
     if (!projectId) return
@@ -94,6 +181,7 @@ export function useCockpitStream(
 
       const sseEvent: SSEEvent = { event: type, data: data as SSEEvent['data'] }
       setLastEvent(sseEvent)
+      syncQueriesForEvent(type, data)
 
       switch (type) {
         case 'agent_start': {
@@ -166,16 +254,22 @@ export function useCockpitStream(
           break
         }
         case 'heartbeat':
-          // 仅保活，无需处理
+          // 状态缓存已在 syncQueriesForEvent 中原子更新。
           break
         case 'review_needed':
           // 由调用方通过 lastEvent 处理
           break
+        case 'chapter_completed':
+          setStreamingContent('')
+          setStreamingChapterId(null)
+          streamingChapterIdRef.current = null
+          break
       }
     }
 
-    // 注册各事件监听
-    ;(['agent_start', 'agent_complete', 'chapter_progress', 'review_needed', 'error', 'heartbeat'] as SSEEventType[]).forEach(
+    // EventSource 对命名事件没有通配监听，必须显式注册后端可能发送的每类
+    // 持久化事件，否则浏览器会静默丢弃 chapter_completed 等关键通知。
+    REGISTERED_EVENT_TYPES.forEach(
       (type) => {
         es.addEventListener(type, handleEvent(type) as EventListener)
       },
@@ -183,7 +277,7 @@ export function useCockpitStream(
 
     // 未命名事件（默认 message）也监听
     es.addEventListener('message', handleEvent('heartbeat') as EventListener)
-  }, [projectId])
+  }, [projectId, syncQueriesForEvent])
 
   useEffect(() => {
     connect()

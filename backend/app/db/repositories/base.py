@@ -3,6 +3,7 @@
 提供基于 SQLAlchemy 2.0 AsyncSession 的通用增删改查能力，
 子类通过指定 ``model`` 即可复用。
 """
+
 from __future__ import annotations
 
 import uuid

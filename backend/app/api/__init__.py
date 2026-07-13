@@ -1,6 +1,8 @@
 """API 路由包。"""
-from app.api.routes_brain import router as brain_router
+
+from app.api.continuous import router as continuous_router
 from app.api.routes_book_memory import router as book_memory_router
+from app.api.routes_brain import router as brain_router
 from app.api.routes_canon import router as canon_router
 from app.api.routes_chat_create import router as chat_create_router
 from app.api.routes_cockpit import router as cockpit_router
@@ -12,7 +14,6 @@ from app.api.routes_provider import router as provider_router
 from app.api.routes_review_queue import router as review_queue_router
 from app.api.routes_storyline import router as storyline_router
 from app.api.routes_usage import router as usage_router
-from app.api.continuous import router as continuous_router
 
 __all__ = [
     "projects_router",

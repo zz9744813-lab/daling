@@ -6,23 +6,47 @@
 - ``current_chapter`` = ``current_chapter_no``
 - ``config`` 由 ``extra`` dict 组装
 """
+
 from __future__ import annotations
 
 import io
 import logging
+import re
 import uuid
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
+from app.api.production_guard import manual_production_guard
 from app.db import get_db
+from app.db.models.chapter import Chapter
+from app.db.models.project import ProjectConfig
+from app.db.models.storyline import StorylineVolume
+from app.db.models.world import WorldBible
 from app.db.repositories.project import ProjectRepository
+from app.services.preparation_state import (
+    artifact_stale_state,
+    outline_source,
+    record_outline_change,
+)
 
 logger = logging.getLogger("app.api.routes_projects")
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+class CreativeConversationMessage(BaseModel):
+    """A persisted message from the project-design conversation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=12_000)
 
 
 class ProjectCreate(BaseModel):
@@ -32,6 +56,8 @@ class ProjectCreate(BaseModel):
     这些字段会写入 Project.extra JSON dict（不新增数据库列）。
     """
 
+    model_config = ConfigDict(populate_by_name=True)
+
     title: str = Field(..., min_length=1, max_length=255)
     genre: Optional[str] = None
     synopsis: Optional[str] = None
@@ -40,12 +66,23 @@ class ProjectCreate(BaseModel):
     target_chapters: Optional[int] = None
     autonomy_level: Optional[str] = None  # L1 / L2 / L3 / L4
     words_per_chapter: Optional[int] = None
+    chapter_words: Optional[int] = None  # 旧前端字段，写入时归一为 words_per_chapter
     language: Optional[str] = None
     tone: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     type: Optional[str] = None  # 前端 Project.type
     config: Optional[dict[str, Any]] = None  # 前端传入的完整 config dict
+    custom_prompt: Optional[str] = Field(default=None, max_length=20_000)
+    creative_conversation: Optional[list[CreativeConversationMessage]] = Field(
+        default=None,
+        max_length=80,
+        validation_alias=AliasChoices("creative_conversation", "conversation"),
+    )
+    creation_blueprint: Optional[dict[str, Any]] = Field(
+        default=None,
+        validation_alias=AliasChoices("creation_blueprint", "blueprint"),
+    )
 
 
 class ProjectOut(BaseModel):
@@ -70,28 +107,111 @@ class ProjectOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+_INTERNAL_EXTRA_KEYS = {
+    "outline_text",
+    "outline_filename",
+    "raw_prompt",
+    "raw_response",
+    "provider_config",
+    "api_key",
+    "api_key_enc",
+    "secret",
+    "token",
+}
+
+
 def _build_config(extra: dict[str, Any]) -> dict[str, Any]:
-    """从 Project.extra 组装前端 ProjectConfig 结构。"""
+    """Return all public project config while excluding internal/large values."""
     if not extra:
         return {}
-    config: dict[str, Any] = {}
-    for key in (
-        "target_chapters",
-        "words_per_chapter",
-        "autonomy_level",
-        "provider",
-        "model",
-        "language",
-        "genre",
-        "tone",
-        "length_type",
-        "length_label",
-        "chapter_range",
-        "estimated_words",
-    ):
-        if key in extra and extra[key] is not None:
-            config[key] = extra[key]
-    return config
+    return {
+        key: value
+        for key, value in extra.items()
+        if value is not None and key not in _INTERNAL_EXTRA_KEYS and not key.startswith("_")
+    }
+
+
+def _normalise_conversation(value: Any) -> Optional[list[dict[str, str]]]:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=422, detail="creative_conversation 必须是消息数组")
+    if len(value) > 80:
+        raise HTTPException(status_code=422, detail="creative_conversation 最多 80 条消息")
+    messages: list[dict[str, str]] = []
+    for item in value:
+        try:
+            message = (
+                item
+                if isinstance(item, CreativeConversationMessage)
+                else CreativeConversationMessage.model_validate(item)
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"creative_conversation 消息格式无效: {exc}",
+            ) from exc
+        messages.append(message.model_dump())
+    return messages
+
+
+def _prepare_project_extra(payload: ProjectCreate) -> tuple[dict[str, Any], Optional[str]]:
+    """Build canonical extra/config and detach the transactional custom prompt."""
+    extra = dict(payload.config or {})
+    for key in _INTERNAL_EXTRA_KEYS:
+        extra.pop(key, None)
+
+    # Backward-compatible aliases are accepted but never persisted twice.
+    if "chapter_words" in extra and "words_per_chapter" not in extra:
+        extra["words_per_chapter"] = extra["chapter_words"]
+    extra.pop("chapter_words", None)
+
+    conversation_value: Any = payload.creative_conversation
+    if conversation_value is None:
+        conversation_value = extra.pop("creative_conversation", None)
+    if conversation_value is None:
+        conversation_value = extra.pop("conversation", None)
+    conversation = _normalise_conversation(conversation_value)
+    if conversation is not None:
+        extra["creative_conversation"] = conversation
+
+    blueprint_value: Any = payload.creation_blueprint
+    if blueprint_value is None:
+        blueprint_value = extra.pop("creation_blueprint", None)
+    if blueprint_value is None:
+        blueprint_value = extra.pop("blueprint", None)
+    if blueprint_value is not None:
+        if not isinstance(blueprint_value, dict):
+            raise HTTPException(status_code=422, detail="creation_blueprint 必须是对象")
+        extra["creation_blueprint"] = blueprint_value
+
+    config_prompt = extra.pop("custom_prompt", None)
+    custom_prompt = payload.custom_prompt if payload.custom_prompt is not None else config_prompt
+    if custom_prompt is not None:
+        custom_prompt = str(custom_prompt).strip()
+        if len(custom_prompt) > 20_000:
+            raise HTTPException(status_code=422, detail="custom_prompt 最多 20000 字符")
+
+    canonical_values = {
+        "target_chapters": payload.target_chapters,
+        "autonomy_level": payload.autonomy_level,
+        "language": payload.language,
+        "tone": payload.tone,
+        "provider": payload.provider,
+        "model": payload.model,
+        "type": payload.type,
+    }
+    words_per_chapter = (
+        payload.words_per_chapter
+        if payload.words_per_chapter is not None
+        else payload.chapter_words
+    )
+    if words_per_chapter is not None:
+        canonical_values["words_per_chapter"] = words_per_chapter
+    for key, value in canonical_values.items():
+        if value is not None:
+            extra[key] = value
+    return extra, custom_prompt
 
 
 def _to_out(obj: Any) -> ProjectOut:
@@ -133,31 +253,9 @@ async def list_projects(
 @router.post("", response_model=ProjectOut, status_code=201)
 @router.post("/", response_model=ProjectOut, status_code=201, include_in_schema=False)
 async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_db)):
-    # 将扩展字段写入 extra dict（不新增数据库列）
-    extra: dict[str, Any] = {}
-    if payload.target_chapters is not None:
-        extra["target_chapters"] = payload.target_chapters
-    if payload.autonomy_level is not None:
-        extra["autonomy_level"] = payload.autonomy_level
-    if payload.words_per_chapter is not None:
-        extra["words_per_chapter"] = payload.words_per_chapter
-    if payload.language is not None:
-        extra["language"] = payload.language
-    if payload.tone is not None:
-        extra["tone"] = payload.tone
-    if payload.provider is not None:
-        extra["provider"] = payload.provider
-    if payload.model is not None:
-        extra["model"] = payload.model
-    if payload.type is not None:
-        extra["type"] = payload.type
-
-    # 前端传入的 config dict 中的所有字段也存入 extra
-    # （包含 length_type / chapter_range / themes 等新字段）
-    if payload.config:
-        for k, v in payload.config.items():
-            if v is not None:
-                extra[k] = v
+    # Project、完整公开 config、创作对话和 custom prompt 使用同一个
+    # AsyncSession/事务写入；任一步失败都会由 get_db 统一回滚。
+    extra, custom_prompt = _prepare_project_extra(payload)
 
     # description 与 synopsis 同义，优先用 synopsis
     synopsis = payload.synopsis if payload.synopsis is not None else payload.description
@@ -171,6 +269,16 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
         status="draft",
         extra=extra,
     )
+
+    if custom_prompt is not None:
+        db.add(
+            ProjectConfig(
+                project_id=obj.id,
+                key="custom_system_prompt",
+                value={"text": custom_prompt},
+            )
+        )
+        await db.flush()
     return _to_out(obj)
 
 
@@ -187,6 +295,7 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 # 自定义系统提示词（类似 Gemini Gems / Custom GPTs）
 # ------------------------------------------------------------------
 
+
 @router.get("/{project_id}/custom-prompt")
 async def get_custom_prompt(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """获取项目的自定义系统提示词。
@@ -195,6 +304,7 @@ async def get_custom_prompt(project_id: uuid.UUID, db: AsyncSession = Depends(ge
     返回 {"text": "..."} 格式。如不存在则返回空文本。
     """
     from sqlalchemy import select as sa_select
+
     from app.db.models.project import ProjectConfig
 
     result = await db.execute(
@@ -205,11 +315,7 @@ async def get_custom_prompt(project_id: uuid.UUID, db: AsyncSession = Depends(ge
     )
     config = result.scalar_one_or_none()
     if config and config.value:
-        text = (
-            config.value.get("text", "")
-            if isinstance(config.value, dict)
-            else str(config.value)
-        )
+        text = config.value.get("text", "") if isinstance(config.value, dict) else str(config.value)
     else:
         text = ""
     return {"project_id": str(project_id), "text": text}
@@ -228,8 +334,6 @@ async def update_custom_prompt(
     这些指令会注入到所有 Agent 的 system prompt 中。
     """
     from sqlalchemy import select as sa_select
-    from sqlalchemy.orm.attributes import flag_modified
-    from app.db.models.project import ProjectConfig
 
     text = payload.get("text", "")
 
@@ -258,7 +362,8 @@ async def update_custom_prompt(
 
     logger.info(
         "项目 %s 自定义系统提示词已更新 (%d 字符)",
-        project_id, len(text),
+        project_id,
+        len(text),
     )
 
     return {"ok": True, "project_id": str(project_id), "text": text}
@@ -268,11 +373,30 @@ async def update_custom_prompt(
 # 上传大纲文件
 # ------------------------------------------------------------------
 
+MAX_OUTLINE_BYTES = 5 * 1024 * 1024
+ALLOWED_OUTLINE_EXTENSIONS = {".docx", ".txt", ".md", ".markdown"}
+
+
+def _outline_extension(filename: str) -> str:
+    extension = Path(filename).suffix.lower()
+    if extension not in ALLOWED_OUTLINE_EXTENSIONS:
+        allowed = " / ".join(sorted(ALLOWED_OUTLINE_EXTENSIONS))
+        raise HTTPException(
+            status_code=415,
+            detail=f"不支持的文件格式 {extension or '(无扩展名)'}；仅支持 {allowed}",
+        )
+    return extension
+
+
 def _extract_text_from_docx(content: bytes) -> str:
     """从 docx 文件字节中提取纯文本。"""
     import docx
+    from docx.opc.exceptions import PackageNotFoundError
 
-    doc = docx.Document(io.BytesIO(content))
+    try:
+        doc = docx.Document(io.BytesIO(content))
+    except (PackageNotFoundError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail="DOCX 文件已损坏或不是有效文档") from exc
     paragraphs = []
     for para in doc.paragraphs:
         text = para.text.strip()
@@ -286,20 +410,89 @@ def _extract_text_from_file(filename: str, content: bytes) -> str:
 
     支持 .docx / .txt / .md
     """
-    lower = filename.lower()
-    if lower.endswith(".docx"):
+    extension = _outline_extension(filename)
+    if extension == ".docx":
         return _extract_text_from_docx(content)
-    elif lower.endswith((".txt", ".md", ".markdown")):
+    if extension in {".txt", ".md", ".markdown"}:
         # 尝试 UTF-8，回退 GBK
         try:
             return content.decode("utf-8")
         except UnicodeDecodeError:
             return content.decode("gbk", errors="replace")
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="不支持的文件格式，请上传 .docx / .txt / .md 文件",
+    raise HTTPException(status_code=415, detail="不支持的文件格式")
+
+
+async def _read_outline_upload(file: UploadFile) -> tuple[str, str, bytes, str]:
+    """Validate and extract an outline upload without mutating project state."""
+    filename = (file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="上传文件缺少文件名")
+    extension = _outline_extension(filename)
+    content = await file.read(MAX_OUTLINE_BYTES + 1)
+    if len(content) > MAX_OUTLINE_BYTES:
+        raise HTTPException(status_code=413, detail="文件超过 5MB 限制")
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    text = _extract_text_from_file(filename, content).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    return filename, extension, content, text
+
+
+async def _derived_artifact_presence(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+) -> tuple[bool, bool]:
+    bible_count = int(
+        await db.scalar(
+            select(func.count(WorldBible.id)).where(WorldBible.project_id == project_id)
         )
+        or 0
+    )
+    volume_count = int(
+        await db.scalar(
+            select(func.count(StorylineVolume.id)).where(
+                StorylineVolume.project_id == project_id
+            )
+        )
+        or 0
+    )
+    chapter_count = int(
+        await db.scalar(select(func.count(Chapter.id)).where(Chapter.project_id == project_id))
+        or 0
+    )
+    return bible_count > 0, volume_count > 0 or chapter_count > 0
+
+
+@router.post("/outline/inspect")
+async def inspect_outline(file: UploadFile = File(...)):
+    """创建项目前解析大纲，让创作对话真正看到文件内容。"""
+    filename, extension, content, text = await _read_outline_upload(file)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    chapter_headings = [
+        line
+        for line in lines
+        if re.match(r"^(第[一二三四五六七八九十百千万零〇两\d]+[章节回]|chapter\s+\d+)", line, re.I)
+    ]
+    volume_headings = [
+        line
+        for line in lines
+        if re.match(r"^(第[一二三四五六七八九十百千万零〇两\d]+卷|volume\s+\d+)", line, re.I)
+    ]
+    return {
+        "ok": True,
+        "filename": filename,
+        "extension": extension,
+        "size_bytes": len(content),
+        "char_count": len(text),
+        "line_count": len(lines),
+        "chapter_heading_count": len(chapter_headings),
+        "volume_heading_count": len(volume_headings),
+        "chapter_headings": chapter_headings[:30],
+        "volume_headings": volume_headings[:20],
+        "preview": text[:1200],
+        "text": text,
+    }
 
 
 @router.post("/{project_id}/upload-outline")
@@ -307,6 +500,7 @@ async def upload_outline(
     project_id: uuid.UUID,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    _manual_guard: None = Depends(manual_production_guard),
 ):
     """上传详细大纲文件（.docx / .txt / .md）。
 
@@ -318,37 +512,56 @@ async def upload_outline(
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024:  # 5MB 限制
-        raise HTTPException(status_code=413, detail="文件过大，请上传 5MB 以下的文件")
+    filename, extension, content, text = await _read_outline_upload(file)
 
-    text = _extract_text_from_file(file.filename or "outline.txt", content)
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="文件内容为空")
-
-    # 存入 extra dict
-    # 注意：SQLAlchemy JSON 字段需要显式标记为已修改
-    from sqlalchemy.orm.attributes import flag_modified
-
-    extra = project.extra or {}
-    extra["outline_text"] = text
-    extra["outline_filename"] = file.filename
+    world_bible_exists, outline_exists = await _derived_artifact_presence(db, project_id)
+    previous_source = outline_source(dict(project.extra or {}))
+    reason = "outline_replaced" if previous_source["present"] else "outline_added"
+    extra, changed = record_outline_change(
+        dict(project.extra or {}),
+        text=text,
+        filename=filename,
+        world_bible_exists=world_bible_exists,
+        outline_exists=outline_exists,
+        reason=reason,
+    )
     project.extra = extra
     flag_modified(project, "extra")
     await db.commit()
 
+    source = outline_source(extra)
+    stale_artifacts = [
+        artifact
+        for artifact, state in (
+            (
+                "world_bible",
+                artifact_stale_state(extra, "world_bible", exists=world_bible_exists),
+            ),
+            ("outline", artifact_stale_state(extra, "outline", exists=outline_exists)),
+        )
+        if state["stale"]
+    ]
+
     logger.info(
         "项目 %s 上传大纲: %s (%d 字符)",
-        project_id, file.filename, len(text),
+        project_id,
+        filename,
+        len(text),
     )
 
     return {
         "ok": True,
         "project_id": str(project_id),
-        "filename": file.filename,
+        "filename": filename,
+        "extension": extension,
+        "size_bytes": len(content),
         "char_count": len(text),
         "preview": text[:500],
+        "outline_changed": changed,
+        "outline_source_revision": source["revision"],
+        "outline_source_sha256": source["sha256"],
+        "preparation_stale": bool(stale_artifacts),
+        "stale_artifacts": stale_artifacts,
     }
 
 
@@ -362,30 +575,49 @@ async def get_outline(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
     extra = project.extra or {}
     text = extra.get("outline_text", "")
+    source = outline_source(dict(extra))
     return {
         "project_id": str(project_id),
         "filename": extra.get("outline_filename"),
         "char_count": len(text),
         "text": text,
+        "source_revision": source["revision"],
+        "source_sha256": source["sha256"],
     }
 
 
 @router.delete("/{project_id}/outline")
-async def delete_outline(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_outline(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _manual_guard: None = Depends(manual_production_guard),
+):
     """删除项目已上传的大纲。"""
     repo = ProjectRepository(db)
     project = await repo.get_by_id(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    extra = project.extra or {}
-    extra.pop("outline_text", None)
-    extra.pop("outline_filename", None)
+    world_bible_exists, outline_exists = await _derived_artifact_presence(db, project_id)
+    extra, changed = record_outline_change(
+        dict(project.extra or {}),
+        text="",
+        filename=None,
+        world_bible_exists=world_bible_exists,
+        outline_exists=outline_exists,
+        reason="outline_removed",
+    )
     project.extra = extra
     flag_modified(project, "extra")
     await db.commit()
 
-    return {"ok": True, "project_id": str(project_id)}
+    return {
+        "ok": True,
+        "project_id": str(project_id),
+        "outline_changed": changed,
+        "outline_source_revision": outline_source(extra)["revision"],
+        "preparation_stale": changed and (world_bible_exists or outline_exists),
+    }
 
 
 # ------------------------------------------------------------------
@@ -410,18 +642,22 @@ async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
     # 先查所有有 project_id 列的表
     try:
-        result = await db.execute(text("""
+        result = await db.execute(
+            text("""
             SELECT table_name FROM information_schema.columns
             WHERE column_name = 'project_id' AND table_schema = 'public'
-        """))
+        """)
+        )
         direct_tables = [row[0] for row in result.fetchall()]
     except Exception:
         direct_tables = []
 
     # 先删 manuscript_blocks 和 chapter_summaries（通过 chapter_id 关联）
     for sub_sql in [
-        "DELETE FROM manuscript_blocks WHERE chapter_id IN (SELECT id FROM chapters WHERE project_id = :pid)",
-        "DELETE FROM chapter_summaries WHERE chapter_id IN (SELECT id FROM chapters WHERE project_id = :pid)",
+        "DELETE FROM manuscript_blocks WHERE chapter_id IN "
+        "(SELECT id FROM chapters WHERE project_id = :pid)",
+        "DELETE FROM chapter_summaries WHERE chapter_id IN "
+        "(SELECT id FROM chapters WHERE project_id = :pid)",
     ]:
         try:
             await db.execute(text(sub_sql), {"pid": pid})
@@ -444,7 +680,7 @@ async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
     try:
         await db.delete(project)
         await db.commit()
-    except Exception as e:
+    except Exception:
         await db.rollback()
         # ORM 删除失败，用 SQL 直接删
         await db.execute(text("DELETE FROM projects WHERE id = :pid"), {"pid": pid})

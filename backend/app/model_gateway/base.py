@@ -2,11 +2,22 @@
 
 定义 LLM 调用的统一数据结构与抽象基类，所有 Provider 实现均需继承 BaseProvider。
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
+
+
+class ModelOutputTruncatedError(RuntimeError):
+    """Provider reported that generation stopped at its output-token limit.
+
+    The partial text may be useful for diagnostics, but it is never a valid
+    artifact.  A dedicated exception lets higher layers choose a safe,
+    bounded generation strategy without mistaking transport/auth failures for
+    an output-size problem.
+    """
 
 
 @dataclass
@@ -34,8 +45,8 @@ class LLMRequest:
         stream: 是否流式返回。
         response_format: 响应格式，如 ``{"type": "json_object"}``。
         stop: 停止序列列表。
-        is_reasoning_model: 是否为推理模型。推理模型会自动提升 max_tokens、
-            跳过 response_format、并通过 reasoning_content 字段返回思考过程。
+        is_reasoning_model: 是否为推理模型。推理模型跳过 response_format，
+            并可能通过 reasoning_content 字段返回思考过程；输出预算不越过角色绑定上限。
     """
 
     messages: list[LLMMessage]

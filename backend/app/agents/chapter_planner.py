@@ -2,17 +2,17 @@
 
 职责：为单章生成详细的场景级写作计划。
 """
+
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 
 from app.agents.base import BaseAgent
 from app.db.models.character import Character
-from app.db.models.chapter import Chapter
 from app.db.models.plot import CurrentStoryState, PlotThread
 from app.db.models.storyline import StorylineBeat
 from app.db.models.summary import ChapterSummary
@@ -62,6 +62,14 @@ class ChapterPlanner(BaseAgent):
             story_state=story_state,
             foreshadows=foreshadows,
         )
+        repair_context = str(getattr(self, "quality_repair_context", "") or "").strip()
+        if repair_context:
+            user_prompt += (
+                "\n\n【上一轮未通过终审的原因】\n"
+                f"{repair_context}\n\n"
+                "请重新设计场景因果、时间线和信息分配，确保新计划逐项消除这些问题；"
+                "不要照抄失败版本的结构。"
+            )
 
         try:
             plan = await self._llm_json(
@@ -93,7 +101,9 @@ class ChapterPlanner(BaseAgent):
 
         logger.info(
             "项目 %s 第 %d 章写作计划已生成: %d 个场景",
-            self.project_id, chapter_no, len(plan["scene_list"]),
+            self.project_id,
+            chapter_no,
+            len(plan["scene_list"]),
         )
         return plan
 
@@ -149,9 +159,7 @@ class ChapterPlanner(BaseAgent):
             return "（暂无角色信息）"
         parts = []
         for c in characters:
-            parts.append(
-                f"- {c.name}（{c.role}）：{c.description or '无描述'}"
-            )
+            parts.append(f"- {c.name}（{c.role}）：{c.description or '无描述'}")
         return "\n".join(parts)
 
     async def _get_story_state(self, chapter_no: int) -> str:

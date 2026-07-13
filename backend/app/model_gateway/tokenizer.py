@@ -6,6 +6,7 @@
 
 仅为粗略估算，用于成本预估与上下文长度控制，非精确值。
 """
+
 from __future__ import annotations
 
 from app.model_gateway.base import LLMMessage

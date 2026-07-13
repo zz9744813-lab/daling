@@ -1,11 +1,12 @@
 """用量与负载引用模型 - usage_daily_stats / payload_refs。"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
 from typing import Any, Optional
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, JSON, String, func
+from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -52,7 +53,12 @@ class PayloadRef(Base):
     storage_key: Mapped[str] = mapped_column(String(500), nullable=False)
     content_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    meta: Mapped[dict[str, Any]] = mapped_column(JSON, name="metadata", nullable=False, default=dict)
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        name="metadata",
+        nullable=False,
+        default=dict,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

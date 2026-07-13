@@ -10,17 +10,20 @@ import {
   CheckCircle2,
   Search,
   Loader2,
+  BookOpenCheck,
+  RotateCcw,
+  AlertTriangle,
 } from 'lucide-react'
 import { TopBar } from '../layout/TopBar'
 import { BossCommandBar } from '../layout/BossCommandBar'
 import { AppShell, AppShellBody } from '../layout/AppShell'
-import { brainApi, canonFactsApi, governanceApi } from '../api/client'
+import { bookMemoryApi, brainApi, canonFactsApi, governanceApi } from '../api/client'
 import { useProjectStore } from '../store/projectStore'
 import { Badge } from '../components/Badge'
 import { Button, Input, TextArea, Card } from '../components/ui'
 import { EmptyState } from '../components/EmptyState'
 import { cn } from '../lib/cn'
-import type { CanonFact, FactMutability, CanonCheckResult } from '../types'
+import type { BookMemory, CanonFact, FactMutability, CanonCheckResult } from '../types'
 
 /**
  * BrainPage —— 大脑
@@ -40,6 +43,12 @@ export default function BrainPage() {
   const { data: canonFacts } = useQuery({
     queryKey: ['canon-facts', projectId],
     queryFn: () => canonFactsApi.list(projectId),
+    enabled: !!projectId,
+  })
+
+  const { data: memories } = useQuery({
+    queryKey: ['book-memory', projectId],
+    queryFn: () => bookMemoryApi.get(projectId),
     enabled: !!projectId,
   })
 
@@ -68,6 +77,18 @@ export default function BrainPage() {
     mutationFn: (factId: string) => canonFactsApi.confirm(projectId, factId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['canon-facts', projectId] })
+    },
+  })
+
+  const memoryAction = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' | 'rollback' }) => {
+      if (action === 'approve') return bookMemoryApi.approve(projectId, id, '大脑页面人工批准')
+      if (action === 'reject') return bookMemoryApi.reject(projectId, id, '大脑页面人工驳回')
+      return bookMemoryApi.rollback(projectId, id, '大脑页面人工回滚')
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['book-memory', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['evolution-overview', projectId] })
     },
   })
 
@@ -209,6 +230,14 @@ export default function BrainPage() {
             </Card>
           </section>
 
+          <MemoryGovernancePanel
+            memories={memories ?? []}
+            busy={memoryAction.isPending}
+            activeId={memoryAction.variables?.id}
+            error={memoryAction.error as Error | null}
+            onAction={(id, action) => memoryAction.mutate({ id, action })}
+          />
+
           {/* Canon Facts 按可变性分组（v5.0） */}
           <section>
             <h2 className="mb-3 flex items-center gap-1.5 text-sm font-medium text-gray-300">
@@ -261,6 +290,118 @@ export default function BrainPage() {
       <BossCommandBar />
     </AppShell>
   )
+}
+
+function MemoryGovernancePanel({
+  memories,
+  busy,
+  activeId,
+  error,
+  onAction,
+}: {
+  memories: BookMemory[]
+  busy: boolean
+  activeId?: string
+  error: Error | null
+  onAction: (id: string, action: 'approve' | 'reject' | 'rollback') => void
+}) {
+  return (
+    <section className="mb-8">
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="flex items-center gap-1.5 text-sm font-medium text-gray-300">
+          <BookOpenCheck size={15} />
+          长期记忆
+        </h2>
+        <Badge variant="outline">{memories.length}</Badge>
+        <span className="text-[10px] text-gray-600">停用条目不会进入下一章上下文</span>
+      </div>
+      {error && (
+        <p className="mb-3 rounded-lg border border-red-400/20 bg-red-400/8 p-2 text-xs text-red-200">
+          {error.message}
+        </p>
+      )}
+      {memories.length === 0 ? (
+        <EmptyState
+          icon={<BookOpenCheck size={24} />}
+          title="暂无长期记忆"
+          description="审稿证据与人工修改形成的学习规则会出现在这里。"
+        />
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {memories.map((memory) => {
+            const isActive = memory.status === 'active' || memory.status === 'approved'
+            const working = busy && activeId === memory.id
+            return (
+              <Card key={memory.id} className="bg-ink-850">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">{memory.memory_type}</Badge>
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-300">
+                    {memory.key}
+                  </span>
+                  <Badge variant={isActive ? 'green' : memory.status === 'rejected' ? 'red' : 'gray'}>
+                    {isActive ? '生效' : memory.status === 'rejected' ? '已驳回' : '已回滚'}
+                  </Badge>
+                </div>
+                <p className="mt-2 line-clamp-4 text-[11px] leading-5 text-gray-500">
+                  {memoryValueText(memory.value)}
+                </p>
+                <div className="mt-2 text-[10px] text-gray-600">
+                  <p>来源：{memory.source || memory.governance?.origin || '未记录'}</p>
+                  <p>置信度：{Math.round((memory.confidence ?? 0) * 100)}%</p>
+                  {memory.governance?.reviewed_at && (
+                    <p>最近治理：{memory.governance.reviewed_by || 'system'} · {formatMemoryTime(memory.governance.reviewed_at)}</p>
+                  )}
+                  {memory.governance?.reason && <p className="line-clamp-2">原因：{memory.governance.reason}</p>}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2 border-t border-ink-700 pt-3">
+                  {!isActive ? (
+                    <Button size="sm" variant="secondary" disabled={busy} onClick={() => onAction(memory.id, 'approve')}>
+                      {working ? <Loader2 size={11} className="animate-spin" /> : <CheckCircle2 size={11} />}
+                      批准恢复
+                    </Button>
+                  ) : (
+                    <>
+                      <Button size="sm" variant="ghost" disabled={busy} onClick={() => onAction(memory.id, 'rollback')}>
+                        {working ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
+                        回滚
+                      </Button>
+                      <Button size="sm" variant="ghost" disabled={busy} onClick={() => onAction(memory.id, 'reject')}>
+                        <AlertTriangle size={11} />
+                        驳回
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </Card>
+            )
+          })}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function memoryValueText(value: Record<string, unknown>) {
+  const primary = value.instruction ?? value.text ?? value.overall_summary
+  if (primary) return String(primary)
+  return Object.entries(value)
+    .slice(0, 6)
+    .map(([key, item]) => `${key}: ${typeof item === 'string' ? item : JSON.stringify(item)}`)
+    .join('；')
+}
+
+function formatMemoryTime(value?: string | null) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? '—'
+    : new Intl.DateTimeFormat('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(date)
 }
 
 /* ============================================================

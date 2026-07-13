@@ -11,7 +11,8 @@ OUTLINE_SYSTEM = """你是一位资深的故事架构师，擅长规划长篇小
 
 你的输出必须是合法的 JSON 对象。不要输出任何 JSON 以外的内容。"""
 
-OUTLINE_USER = """请根据以下世界观圣经，生成 {volume_count} 卷的故事大纲，每卷 {chapters_per_volume} 章。
+OUTLINE_USER = """请根据以下世界观圣经，生成 {volume_count} 卷的故事大纲，
+每卷 {chapters_per_volume} 章。
 
 【世界观圣经】
 {world_bible}

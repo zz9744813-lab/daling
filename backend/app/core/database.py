@@ -6,6 +6,7 @@
 
 包含平台无关的 GUID 类型（PostgreSQL 用原生 UUID，其它方言用 String(36)）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import TypeDecorator
 
 from app.core.config import settings
@@ -168,12 +169,47 @@ async def init_db() -> None:
         # create_all 不会为已存在的表添加列，故手动迁移。
         # 注意：仅在 SQLite 下执行，PostgreSQL 的 create_all 已包含完整列定义
         if settings.is_sqlite:
+            # Columns introduced after the first durable-run prototype.  The
+            # desktop edition may already have a continuous_runs table, while
+            # create_all only creates missing tables and never adds columns.
+            for statement in (
+                "ALTER TABLE continuous_runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE continuous_runs ADD COLUMN fencing_token INTEGER NOT NULL DEFAULT 0",
+            ):
+                try:
+                    await conn.execute(text(statement))
+                except Exception:
+                    pass  # column already exists
             try:
                 await conn.execute(
                     text("ALTER TABLE model_bindings ADD COLUMN agent_role VARCHAR(50)")
                 )
             except Exception:
                 pass  # 列已存在
+
+            # Autonomous production must never schedule the same chapter or
+            # version twice. Existing duplicates intentionally fail startup so
+            # they can be repaired instead of being silently preserved.
+            unique_indexes = (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_chapter_project_no "
+                "ON chapters(project_id, chapter_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_chapter_version_no "
+                "ON chapter_versions(chapter_id, version_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_chapter_block_no "
+                "ON manuscript_blocks(chapter_id, block_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_storyline_volume_project_no "
+                "ON storyline_volumes(project_id, volume_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_storyline_beat_chapter "
+                "ON storyline_beats(project_id, chapter_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_chapter_summary_project_no "
+                "ON chapter_summaries(project_id, chapter_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_story_state_project_no "
+                "ON current_story_states(project_id, chapter_no)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_book_memory_key "
+                "ON book_memory(project_id, memory_type, key)",
+            )
+            for statement in unique_indexes:
+                await conn.execute(text(statement))
             try:
                 await conn.execute(
                     text(

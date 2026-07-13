@@ -3,6 +3,7 @@
 用两个不同 prompt 分别调用 LLM，再用 judge prompt 让 LLM 评判哪个更好，
 结果持久化到 AgentRun.result JSON 字段（agent_name="prompt_lab"）。
 """
+
 from __future__ import annotations
 
 import json
@@ -87,22 +88,24 @@ class PromptLab:
         # LLM 未配置时返回占位结果
         if not self.llm.is_configured:
             logger.warning("LLM 未配置，PromptLab 返回占位实验结果")
-            return self._placeholder_result(
-                experiment_id, prompt_a, prompt_b, test_input
-            )
+            return self._placeholder_result(experiment_id, prompt_a, prompt_b, test_input)
 
         # 1. 用 prompt_a 调用 LLM
         t0 = time.monotonic()
-        resp_a = await self.llm.chat([
-            {"role": "system", "content": prompt_a},
-            {"role": "user", "content": test_input},
-        ])
+        resp_a = await self.llm.chat(
+            [
+                {"role": "system", "content": prompt_a},
+                {"role": "user", "content": test_input},
+            ]
+        )
 
         # 2. 用 prompt_b 调用 LLM
-        resp_b = await self.llm.chat([
-            {"role": "system", "content": prompt_b},
-            {"role": "user", "content": test_input},
-        ])
+        resp_b = await self.llm.chat(
+            [
+                {"role": "system", "content": prompt_b},
+                {"role": "user", "content": test_input},
+            ]
+        )
 
         # 3. 评判
         scores, judge_reasoning = await self._judge(
@@ -129,6 +132,9 @@ class PromptLab:
             "scores": {"a": score_a, "b": score_b},
             "response_a": resp_a.content,
             "response_b": resp_b.content,
+            "output_a": resp_a.content,
+            "output_b": resp_b.content,
+            "score_scale": 40,
             "judge_reasoning": judge_reasoning,
             "input_tokens": total_input,
             "output_tokens": total_output,
@@ -137,13 +143,14 @@ class PromptLab:
         }
 
         # 4. 持久化到 AgentRun
-        await self._save_experiment(
-            pid, experiment_id, prompt_a, prompt_b, test_input, result
-        )
+        await self._save_experiment(pid, experiment_id, prompt_a, prompt_b, test_input, result)
 
         logger.info(
             "PromptLab 实验 %s 完成: winner=%s scores=%.1f/%.1f",
-            experiment_id, winner, score_a, score_b,
+            experiment_id,
+            winner,
+            score_a,
+            score_b,
         )
         return result
 
@@ -172,15 +179,17 @@ class PromptLab:
         experiments = []
         for run in runs:
             r = run.result or {}
-            experiments.append({
-                "experiment_id": r.get("experiment_id", str(run.id)),
-                "winner": r.get("winner", "unknown"),
-                "scores": r.get("scores", {}),
-                "input_tokens": run.input_tokens,
-                "output_tokens": run.output_tokens,
-                "cost": run.cost,
-                "created_at": run.created_at.isoformat() if run.created_at else None,
-            })
+            experiments.append(
+                {
+                    "experiment_id": r.get("experiment_id", str(run.id)),
+                    "winner": r.get("winner", "unknown"),
+                    "scores": r.get("scores", {}),
+                    "input_tokens": run.input_tokens,
+                    "output_tokens": run.output_tokens,
+                    "cost": run.cost,
+                    "created_at": run.created_at.isoformat() if run.created_at else None,
+                }
+            )
         return experiments
 
     # ------------------------------------------------------------------
@@ -302,6 +311,9 @@ class PromptLab:
             "scores": {"a": 0.0, "b": 0.0},
             "response_a": "",
             "response_b": "",
+            "output_a": "",
+            "output_b": "",
+            "score_scale": 40,
             "judge_reasoning": "LLM 未配置，无法进行评判",
             "input_tokens": 0,
             "output_tokens": 0,

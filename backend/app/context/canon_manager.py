@@ -8,6 +8,7 @@ CanonManager 提供：
 - 冲突检测（check_conflict）— 检查新事实是否与现有事实冲突
 - 事实抽取（extract_facts_from_text）— 调用 LLM 从正文抽取 SPO 三元组
 """
+
 from __future__ import annotations
 
 import logging
@@ -61,6 +62,29 @@ class CanonManager:
         - 如果与现有 soft/evolving 事实冲突，自动取代旧事实。
         - 无冲突则直接创建。
         """
+        # 同一事实由重试、记忆恢复或人工批准重复提交时只确认来源，
+        # 不制造重复 Canon。这个幂等边界对 24 小时恢复尤其重要。
+        exact_stmt = select(CanonFact).where(
+            CanonFact.project_id == self.project_id,
+            CanonFact.status == "active",
+            CanonFact.fact_type == fact_type,
+            CanonFact.subject_type == subject_type,
+            CanonFact.subject_id == subject_id,
+            CanonFact.predicate == predicate,
+            CanonFact.object_value == object_value,
+        )
+        exact_result = await self.db.execute(exact_stmt)
+        exact = exact_result.scalar_one_or_none()
+        if exact:
+            if source_chapter_no is not None:
+                exact.last_confirmed_chapter_no = max(
+                    exact.last_confirmed_chapter_no or 0,
+                    source_chapter_no,
+                )
+            exact.confidence = max(exact.confidence, confidence)
+            await self.db.flush()
+            return exact
+
         new_fact_data = {
             "fact_type": fact_type,
             "subject_type": subject_type,
@@ -74,8 +98,7 @@ class CanonManager:
 
         if conflict["has_conflict"]:
             immutable_conflicts = [
-                f for f in conflict["conflicting_facts"]
-                if f.get("mutability") == "immutable"
+                f for f in conflict["conflicting_facts"] if f.get("mutability") == "immutable"
             ]
             if immutable_conflicts:
                 raise CanonConflictError(
@@ -106,9 +129,7 @@ class CanonManager:
         if conflict["has_conflict"] and conflict["can_supersede"]:
             for old_fact_info in conflict["conflicting_facts"]:
                 try:
-                    old_fact = await self.db.get(
-                        CanonFact, uuid.UUID(old_fact_info["id"])
-                    )
+                    old_fact = await self.db.get(CanonFact, uuid.UUID(old_fact_info["id"]))
                     if old_fact and old_fact.status == "active":
                         old_fact.superseded_by_fact_id = fact.id
                         old_fact.status = "superseded"
@@ -173,10 +194,7 @@ class CanonManager:
         # tags 过滤（JSON 字段，需要 Python 侧过滤）
         if tags:
             tag_set = set(tags)
-            facts = [
-                f for f in facts
-                if tag_set & set(f.tags or [])
-            ]
+            facts = [f for f in facts if tag_set & set(f.tags or [])]
         return facts
 
     async def get_immutable_facts(self) -> list[CanonFact]:
@@ -252,9 +270,12 @@ class CanonManager:
 
         logger.info(
             "事实取代: %s -> %s (%s:%s %s='%s' -> '%s')",
-            old_fact_id, new_fact.id,
-            old_fact.subject_type, old_fact.subject_id,
-            old_fact.predicate, old_fact.object_value[:30],
+            old_fact_id,
+            new_fact.id,
+            old_fact.subject_type,
+            old_fact.subject_id,
+            old_fact.predicate,
+            old_fact.object_value[:30],
             new_fact.object_value[:30],
         )
         return new_fact
@@ -310,18 +331,20 @@ class CanonManager:
         new_object = new_fact.get("object_value", "")
         for ef in existing_facts:
             if ef.object_value != new_object:
-                conflicts.append({
-                    "id": str(ef.id),
-                    "fact_type": ef.fact_type,
-                    "subject_type": ef.subject_type,
-                    "subject_id": ef.subject_id,
-                    "predicate": ef.predicate,
-                    "object_value": ef.object_value,
-                    "mutability": ef.mutability,
-                    "new_object_value": new_object,
-                    "source_chapter_no": ef.source_chapter_no,
-                    "last_confirmed_chapter_no": ef.last_confirmed_chapter_no,
-                })
+                conflicts.append(
+                    {
+                        "id": str(ef.id),
+                        "fact_type": ef.fact_type,
+                        "subject_type": ef.subject_type,
+                        "subject_id": ef.subject_id,
+                        "predicate": ef.predicate,
+                        "object_value": ef.object_value,
+                        "mutability": ef.mutability,
+                        "new_object_value": new_object,
+                        "source_chapter_no": ef.source_chapter_no,
+                        "last_confirmed_chapter_no": ef.last_confirmed_chapter_no,
+                    }
+                )
                 if ef.mutability == "immutable":
                     can_supersede = False
 
@@ -363,7 +386,8 @@ class CanonManager:
             "- subject_id: 主体标识（通常为名称）\n"
             "- predicate: 谓词（如 职业/位置/状态/拥有/关系）\n"
             "- object_value: 客体值\n"
-            "- mutability: 可变性（immutable=不可变核心设定 / soft=可随剧情演进 / dynamic=频繁变化的状态）\n"
+            "- mutability: 可变性（immutable=不可变核心设定 / "
+            "soft=可随剧情演进 / dynamic=频繁变化的状态）\n"
             "只提取明确陈述的事实，不要推测。"
         )
 
@@ -420,14 +444,16 @@ class CanonManager:
             mutability = item.get("mutability", "soft")
             if mutability not in valid_mutabilities:
                 mutability = "soft"
-            facts.append({
-                "fact_type": item.get("fact_type", "setting"),
-                "subject_type": item.get("subject_type", ""),
-                "subject_id": item.get("subject_id"),
-                "predicate": predicate,
-                "object_value": object_value,
-                "mutability": mutability,
-            })
+            facts.append(
+                {
+                    "fact_type": item.get("fact_type", "setting"),
+                    "subject_type": item.get("subject_type", ""),
+                    "subject_id": item.get("subject_id"),
+                    "predicate": predicate,
+                    "object_value": object_value,
+                    "mutability": mutability,
+                }
+            )
 
         logger.info("从 %s 抽取到 %d 条事实", chapter_label, len(facts))
         return facts

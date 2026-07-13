@@ -1,11 +1,11 @@
 """项目模型 - projects / project_configs。"""
+
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base

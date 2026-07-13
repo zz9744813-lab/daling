@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -8,24 +6,26 @@
    v5.0 UI 规范：深色书房主题，低饱和度，正文衬线字体
    ============================================================ */
 :root {
+  color-scheme: dark;
   /* 背景层级 */
-  --bg-base: #0d0e14;
-  --bg-surface: #12131a;
-  --bg-elevated: #1a1d29;
-  --bg-hover: #222634;
+  --bg-base: #10110f;
+  --bg-surface: #151713;
+  --bg-elevated: #1a1c18;
+  --bg-hover: #20231e;
 
   /* 边框 */
-  --border-subtle: #222634;
-  --border-default: #2d3242;
+  --border-subtle: #2a2e28;
+  --border-default: #373d35;
 
   /* 文字 */
-  --text-primary: #e7e5e0;
-  --text-secondary: #9ca3af;
-  --text-muted: #6b7280;
+  --text-primary: #f0eee7;
+  --text-secondary: #aaa99f;
+  --text-muted: #777970;
 
   /* 品牌金 */
-  --accent: #c9a227;
-  --accent-soft: rgba(201, 162, 39, 0.12);
+  --accent: #78c69b;
+  --accent-soft: rgba(120, 198, 155, 0.12);
+  --accent-warm: #cda65b;
 
   /* 状态色 */
   --st-planned: #6b7280;
@@ -45,14 +45,28 @@ body {
   margin: 0;
   background-color: var(--bg-base);
   color: var(--text-primary);
-  font-family: 'Noto Sans SC', system-ui, sans-serif;
+  font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Source Han Sans SC', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button,
+summary,
+select {
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* 选中样式 */
 ::selection {
-  background: rgba(201, 162, 39, 0.3);
+  background: rgba(120, 198, 155, 0.24);
   color: #fff;
 }
 
@@ -67,11 +81,11 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2d3242;
+  background: #373d35;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a4055;
+  background: #4a5147;
 }
 
 /* ============================================================
@@ -119,7 +133,7 @@ body {
 /* 稿纸氛围背景 */
 .manuscript-desk {
   background-color: var(--bg-surface);
-  background-image: radial-gradient(circle at 50% 0%, rgba(201, 162, 39, 0.03), transparent 60%);
+  background-image: radial-gradient(circle at 50% 0%, rgba(205, 166, 91, 0.035), transparent 60%);
 }
 
 /* ============================================================
@@ -137,4 +151,51 @@ body {
 /* 过渡动画（保持简洁） */
 .transition-panel {
   transition: width 0.2s ease, opacity 0.2s ease;
+}
+
+/* 新首页与创建工作区的低对比纸张网格，仅增加层次，不抢正文。 */
+.subtle-grid {
+  background-image:
+    radial-gradient(circle at 50% -10%, rgba(120, 198, 155, 0.055), transparent 34rem),
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+  background-position: center, center, center;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.form-select {
+  height: 2.25rem;
+  width: 100%;
+  border-radius: 0.625rem;
+  border: 1px solid #373d35;
+  background-color: #10110f;
+  padding: 0 2.25rem 0 0.75rem;
+  color: #e5e7eb;
+  font-size: 0.75rem;
+  outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.form-select:focus {
+  border-color: rgba(110, 231, 183, 0.5);
+  box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -1,8 +1,9 @@
 """测试 Critic 失败处理 — 失败不默认 75 分。"""
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock
 
-from app.domain.errors import QualityCheckError, EmptyResultError
+import pytest
+from app.domain.errors import EmptyResultError, QualityCheckError
 
 
 @pytest.mark.asyncio
@@ -45,11 +46,13 @@ async def test_critic_no_scores_raises_exception():
     )
 
     # mock _llm_json 返回空评分
-    critic._llm_json = AsyncMock(return_value={
-        "scores": {},
-        "overall_score": None,
-        "issues": [],
-    })
+    critic._llm_json = AsyncMock(
+        return_value={
+            "scores": {},
+            "overall_score": None,
+            "issues": [],
+        }
+    )
 
     # mock 辅助方法
     critic._get_characters_info = AsyncMock(return_value="角色信息")

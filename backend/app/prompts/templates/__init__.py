@@ -1,4 +1,5 @@
 """Prompt 模板统一导出。"""
+
 from app.prompts.templates.chapter_plan import CHAPTER_PLAN_SYSTEM, CHAPTER_PLAN_USER
 from app.prompts.templates.continuity import CONTINUITY_SYSTEM, CONTINUITY_USER
 from app.prompts.templates.critic import CRITIC_SYSTEM, CRITIC_USER

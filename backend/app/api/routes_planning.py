@@ -1,4 +1,5 @@
 """规划反思路由（v5.0）- GET /api/planning-reflections/{project_id}。"""
+
 from __future__ import annotations
 
 import uuid
@@ -19,6 +20,7 @@ router = APIRouter(prefix="/api/planning-reflections", tags=["planning"])
 # Pydantic 模型
 # ---------------------------------------------------------------------------
 
+
 class PlanningReflectionOut(BaseModel):
     id: str
     project_id: str
@@ -36,6 +38,7 @@ class PlanningReflectionOut(BaseModel):
 # 辅助函数
 # ---------------------------------------------------------------------------
 
+
 def _to_out(r: PlanningReflection) -> PlanningReflectionOut:
     return PlanningReflectionOut(
         id=str(r.id),
@@ -52,6 +55,7 @@ def _to_out(r: PlanningReflection) -> PlanningReflectionOut:
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
+
 
 @router.get("/{project_id}", response_model=list[PlanningReflectionOut])
 async def list_planning_reflections(
@@ -72,11 +76,7 @@ async def list_planning_reflections(
         stmt = stmt.where(PlanningReflection.reflection_type == reflection_type)
     if chapter_no is not None:
         stmt = stmt.where(PlanningReflection.chapter_no == chapter_no)
-    stmt = (
-        stmt.order_by(PlanningReflection.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    stmt = stmt.order_by(PlanningReflection.created_at.desc()).offset(offset).limit(limit)
     result = await db.execute(stmt)
     reflections = list(result.scalars().all())
     return [_to_out(r) for r in reflections]

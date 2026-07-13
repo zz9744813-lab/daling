@@ -8,6 +8,7 @@
 - 流式解析 content_block_delta 事件
 - 错误处理：超时、429 速率限制、5xx 重试（最多 3 次，指数退避）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +18,12 @@ from typing import AsyncGenerator, Optional
 
 import httpx
 
-from app.model_gateway.base import BaseProvider, LLMRequest, LLMResponse
+from app.model_gateway.base import (
+    BaseProvider,
+    LLMRequest,
+    LLMResponse,
+    ModelOutputTruncatedError,
+)
 from app.model_gateway.tokenizer import estimate_messages_tokens, estimate_tokens
 
 logger = logging.getLogger("app.model_gateway.anthropic")
@@ -61,9 +67,7 @@ class AnthropicProvider(BaseProvider):
             "Content-Type": "application/json",
         }
 
-    def _split_system_messages(
-        self, request: LLMRequest
-    ) -> tuple[str, list[dict]]:
+    def _split_system_messages(self, request: LLMRequest) -> tuple[str, list[dict]]:
         """将 system 消息单独提取，剩余消息只含 user/assistant。
 
         Anthropic API 要求 system 作为顶层字段传入，messages 只含
@@ -102,9 +106,7 @@ class AnthropicProvider(BaseProvider):
     def _url(self) -> str:
         return f"{self.base_url}/v1/messages"
 
-    async def _request_with_retry(
-        self, client: httpx.AsyncClient, payload: dict
-    ) -> httpx.Response:
+    async def _request_with_retry(self, client: httpx.AsyncClient, payload: dict) -> httpx.Response:
         """带重试逻辑的 HTTP POST 请求。
 
         对 429 和 5xx 错误进行指数退避重试。
@@ -112,15 +114,15 @@ class AnthropicProvider(BaseProvider):
         last_exc: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = await client.post(
-                    self._url(), json=payload, headers=self._build_headers()
-                )
+                resp = await client.post(self._url(), json=payload, headers=self._build_headers())
                 # 429 速率限制 → 重试
                 if resp.status_code == 429:
                     wait = 2 ** (attempt - 1)
                     logger.warning(
                         "收到 429 速率限制，%ds 后重试（第 %d/%d 次）",
-                        wait, attempt, self.max_retries,
+                        wait,
+                        attempt,
+                        self.max_retries,
                     )
                     last_exc = httpx.HTTPStatusError(
                         "Rate limited (429)", request=resp.request, response=resp
@@ -134,11 +136,15 @@ class AnthropicProvider(BaseProvider):
                     wait = 2 ** (attempt - 1)
                     logger.warning(
                         "收到 %d 服务端错误，%ds 后重试（第 %d/%d 次）",
-                        resp.status_code, wait, attempt, self.max_retries,
+                        resp.status_code,
+                        wait,
+                        attempt,
+                        self.max_retries,
                     )
                     last_exc = httpx.HTTPStatusError(
                         f"Server error ({resp.status_code})",
-                        request=resp.request, response=resp,
+                        request=resp.request,
+                        response=resp,
                     )
                     if attempt < self.max_retries:
                         await asyncio.sleep(wait)
@@ -153,7 +159,10 @@ class AnthropicProvider(BaseProvider):
                 wait = 2 ** (attempt - 1)
                 logger.warning(
                     "请求超时，%ds 后重试（第 %d/%d 次）: %s",
-                    wait, attempt, self.max_retries, exc,
+                    wait,
+                    attempt,
+                    self.max_retries,
+                    exc,
                 )
                 if attempt < self.max_retries:
                     await asyncio.sleep(wait)
@@ -209,6 +218,7 @@ class AnthropicProvider(BaseProvider):
     async def stream_complete(self, request: LLMRequest) -> AsyncGenerator[str, None]:
         """流式补全，解析 content_block_delta 事件。"""
         payload = self._build_payload(request, stream=True)
+        stop_reason = ""
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await self._request_with_retry(client, payload)
@@ -224,8 +234,10 @@ class AnthropicProvider(BaseProvider):
                         logger.debug("跳过无法解析的 SSE 行: %s", data_str)
                         continue
                     event_type = chunk.get("type", "")
+                    if event_type == "message_delta":
+                        stop_reason = str((chunk.get("delta") or {}).get("stop_reason") or "")
                     # content_block_delta 事件携带增量文本
-                    if event_type == "content_block_delta":
+                    elif event_type == "content_block_delta":
                         delta = chunk.get("delta", {})
                         if delta.get("type") == "text_delta":
                             text = delta.get("text", "")
@@ -234,3 +246,7 @@ class AnthropicProvider(BaseProvider):
                     # message_stop 事件表示流结束
                     elif event_type == "message_stop":
                         break
+        if stop_reason == "max_tokens":
+            raise ModelOutputTruncatedError(
+                "模型流式输出达到长度上限，正文可能不完整；已拒绝该结果"
+            )

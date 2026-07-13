@@ -5,6 +5,7 @@ import { useProjectStore } from './store/projectStore'
 
 // 路由懒加载
 const ProjectSelectPage = lazy(() => import('./pages/ProjectSelectPage'))
+const NewProjectPage = lazy(() => import('./pages/NewProjectPage'))
 const CockpitPage = lazy(() => import('./pages/CockpitPage'))
 const StorylinePage = lazy(() => import('./pages/StorylinePage'))
 const BrainPage = lazy(() => import('./pages/BrainPage'))
@@ -38,6 +39,7 @@ export default function App() {
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<ProjectSelectPage />} />
+          <Route path="/projects/new" element={<NewProjectPage />} />
           <Route
             path="/cockpit"
             element={

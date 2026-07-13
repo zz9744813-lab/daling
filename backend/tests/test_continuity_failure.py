@@ -1,8 +1,9 @@
 """测试 ContinuityGuard 失败处理 — 失败不默认 passed=True。"""
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock
 
-from app.domain.errors import QualityCheckError, EmptyResultError
+import pytest
+from app.domain.errors import EmptyResultError, QualityCheckError
 
 
 @pytest.mark.asyncio
@@ -47,11 +48,13 @@ async def test_continuity_missing_passed_field_raises_exception():
     )
 
     # mock _llm_json 返回缺少 passed 字段的结果
-    guard._llm_json = AsyncMock(return_value={
-        "conflicts": [],
-        "warnings": [],
-        # 没有 passed 字段
-    })
+    guard._llm_json = AsyncMock(
+        return_value={
+            "conflicts": [],
+            "warnings": [],
+            # 没有 passed 字段
+        }
+    )
 
     # mock 辅助方法
     guard._get_world_summary = AsyncMock(return_value="世界观")

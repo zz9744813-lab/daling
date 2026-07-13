@@ -3,11 +3,11 @@
 职责：检查正文与已有设定、前文内容的一致性。
 Phase 5 会增强为基于 CanonFact 的完整一致性校验。
 """
+
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 
@@ -34,9 +34,7 @@ class ContinuityGuard(BaseAgent):
         chapter_no: int,
     ) -> dict[str, Any]:
         """对章节正文进行一致性校验（接受内容快照）。"""
-        manuscript_text = "\n\n".join(
-            b["content"] for b in block_texts if b.get("content")
-        )
+        manuscript_text = "\n\n".join(b["content"] for b in block_texts if b.get("content"))
         world_summary = await self._get_world_summary()
         previous_summaries = await self._get_previous_summaries(chapter_no)
         characters_info = await self._get_characters_info()
@@ -60,7 +58,8 @@ class ContinuityGuard(BaseAgent):
         except Exception as exc:
             logger.error(
                 "项目 %s ContinuityGuard LLM 调用失败: %s",
-                self.project_id, exc,
+                self.project_id,
+                exc,
             )
             raise QualityCheckError(
                 "ContinuityGuard LLM 调用失败",
@@ -83,8 +82,11 @@ class ContinuityGuard(BaseAgent):
 
         logger.info(
             "项目 %s 第 %d 章一致性校验: passed=%s, %d 个冲突, %d 个警告",
-            self.project_id, chapter_no, result["passed"],
-            len(result.get("conflicts", [])), len(result.get("warnings", [])),
+            self.project_id,
+            chapter_no,
+            result["passed"],
+            len(result.get("conflicts", [])),
+            len(result.get("warnings", [])),
         )
         return result
 

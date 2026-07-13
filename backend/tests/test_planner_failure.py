@@ -4,9 +4,10 @@
 - 不允许用默认成功值掩盖异常
 - 不允许 LLM 失败后生成占位正文并继续
 """
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 from app.domain.errors import AgentExecutionError, EmptyResultError
 
 
@@ -52,13 +53,15 @@ async def test_planner_empty_scene_list_raises_exception():
     )
 
     # mock _llm_json 返回空场景列表
-    planner._llm_json = AsyncMock(return_value={
-        "chapter_no": 1,
-        "chapter_title": "测试章节",
-        "scene_list": [],  # 空场景列表
-        "overall_goal": "测试目标",
-        "ending_hook": "测试钩子",
-    })
+    planner._llm_json = AsyncMock(
+        return_value={
+            "chapter_no": 1,
+            "chapter_title": "测试章节",
+            "scene_list": [],  # 空场景列表
+            "overall_goal": "测试目标",
+            "ending_hook": "测试钩子",
+        }
+    )
 
     # mock 辅助方法
     planner._get_beat_info = AsyncMock(return_value=None)

@@ -12,7 +12,7 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-lg border border-ink-700 bg-ink-850 p-4 shadow-sm',
+        'rounded-xl border border-ink-700 bg-ink-850 p-4 shadow-[0_12px_35px_rgba(0,0,0,0.12)]',
         className,
       )}
       {...props}
@@ -58,9 +58,9 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const buttonVariants: Record<ButtonVariant, string> = {
-  primary: 'bg-gold-500 text-ink-950 hover:bg-gold-400 border border-transparent',
+  primary: 'bg-emerald-300 text-emerald-950 hover:bg-emerald-200 border border-transparent shadow-sm',
   secondary:
-    'bg-ink-700 text-gray-200 hover:bg-ink-600 border border-ink-600',
+    'bg-ink-800 text-gray-200 hover:bg-ink-700 border border-ink-600',
   ghost: 'bg-transparent text-gray-300 hover:bg-ink-700 border border-transparent',
   danger: 'bg-red-600/80 text-white hover:bg-red-600 border border-transparent',
 }
@@ -68,7 +68,7 @@ const buttonVariants: Record<ButtonVariant, string> = {
 const buttonSizes: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs',
   md: 'h-9 px-4 text-sm',
-  lg: 'h-11 px-6 text-base',
+  lg: 'h-11 px-5 text-sm',
 }
 
 export function Button({
@@ -81,8 +81,8 @@ export function Button({
   return (
     <button
       className={cn(
-        'inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors',
-        'focus:outline-none focus-visible:ring-2 focus-visible:ring-gold-500/50',
+        'inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-1 focus-visible:ring-offset-ink-950',
         'disabled:cursor-not-allowed disabled:opacity-50',
         buttonVariants[variant],
         buttonSizes[size],
@@ -104,9 +104,9 @@ export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttribute
       <input
         ref={ref}
         className={cn(
-          'h-9 w-full rounded-md border border-ink-600 bg-ink-900 px-3 text-sm text-gray-200',
+          'h-9 w-full rounded-lg border border-ink-600 bg-ink-950 px-3 text-sm text-gray-200',
           'placeholder:text-gray-500',
-          'focus:outline-none focus:border-gold-500/60 focus:ring-1 focus:ring-gold-500/30',
+          'focus:outline-none focus:border-emerald-400/50 focus:ring-2 focus:ring-emerald-400/10',
           className,
         )}
         {...props}
@@ -126,9 +126,9 @@ export const TextArea = React.forwardRef<
     <textarea
       ref={ref}
       className={cn(
-        'w-full rounded-md border border-ink-600 bg-ink-900 px-3 py-2 text-sm text-gray-200',
+        'w-full rounded-lg border border-ink-600 bg-ink-950 px-3 py-2 text-sm leading-6 text-gray-200',
         'placeholder:text-gray-500 resize-none',
-        'focus:outline-none focus:border-gold-500/60 focus:ring-1 focus:ring-gold-500/30',
+        'focus:outline-none focus:border-emerald-400/50 focus:ring-2 focus:ring-emerald-400/10',
         className,
       )}
       {...props}
@@ -150,7 +150,7 @@ export function ProgressBar({ value, max = 100, className }: ProgressBarProps) {
   return (
     <div className={cn('h-1.5 w-full overflow-hidden rounded-full bg-ink-700', className)}>
       <div
-        className="h-full rounded-full bg-gold-500 transition-all"
+        className="h-full rounded-full bg-gradient-to-r from-gold-500 to-emerald-400 transition-all"
         style={{ width: `${pct}%` }}
       />
     </div>
@@ -182,13 +182,13 @@ export function Tabs({ items, active, onChange, className }: TabsProps) {
           className={cn(
             'relative px-3 py-2 text-sm transition-colors',
             active === item.key
-              ? 'text-gold-400'
+              ? 'text-emerald-300'
               : 'text-gray-400 hover:text-gray-200',
           )}
         >
           {item.label}
           {active === item.key && (
-            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-gold-500" />
+            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-400" />
           )}
         </button>
       ))}

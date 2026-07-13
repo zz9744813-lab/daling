@@ -8,18 +8,24 @@
 - POST /{project_id}/reflection          — 创建反思
 - GET  /{project_id}/reflections         — 列出反思记录
 """
+
 from __future__ import annotations
 
 import logging
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.context.book_memory_manager import memory_governance, visible_memory_value
 from app.db import get_db
+from app.db.models.memory import BookMemory
+from app.db.models.quality import HumanFeedbackEvent, LearningCycle, PromptVersion
 from app.learning import LearningLab, PromptLab, SkillLab
+from app.services.prompt_evolution import PromptEvolutionService
 
 logger = logging.getLogger("app.api.evolution")
 
@@ -35,6 +41,14 @@ class EvolutionView(BaseModel):
     skill_tests: list[dict[str, Any]] = []
     reflections_count: int = 0
     latest_suggestions: list[str] = []
+    quality_report: dict[str, Any] = {}
+    learning_cycles: list[dict[str, Any]] = []
+    prompt_versions: list[dict[str, Any]] = []
+    recent_reflections: list[dict[str, Any]] = []
+    memory_entries: list[dict[str, Any]] = []
+    memory_count: int = 0
+    memory_status_counts: dict[str, int] = {}
+    pending_feedback_count: int = 0
 
 
 class PromptExperimentRequest(BaseModel):
@@ -47,15 +61,14 @@ class PromptExperimentRequest(BaseModel):
 class SkillTestRequest(BaseModel):
     skill_name: str
     test_cases: list[dict[str, Any]] = Field(
-        ..., min_length=1,
+        ...,
+        min_length=1,
         description="测试用例列表",
     )
 
 
 class ReflectionRequest(BaseModel):
-    reflection_type: str = Field(
-        ..., description="pre_chapter/post_chapter/session_end/volume_end"
-    )
+    reflection_type: str = Field(..., description="pre_chapter/post_chapter/session_end/volume_end")
     chapter_no: Optional[int] = None
     content: str = ""
     decisions: Optional[list[Any]] = None
@@ -69,6 +82,15 @@ class LearningReportResponse(BaseModel):
     common_issues: list[dict[str, Any]] = []
     lessons_learned: list[dict[str, Any]] = []
     suggestions: list[str] = []
+
+
+class HoldoutEvaluationRequest(BaseModel):
+    """An explicit, potentially billable holdout execution request."""
+
+    force: bool = Field(
+        False,
+        description="重新运行已经完成的固定 holdout；默认复用相同套件的既有证据",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +118,66 @@ async def get_evolution(
     # 最新建议（从最近的学习报告中提取）
     report = await learning_lab.generate_report(project_id)
     suggestions = report.get("suggestions", [])
+    cycles = (
+        (
+            await db.execute(
+                select(LearningCycle)
+                .where(LearningCycle.project_id == project_id)
+                .order_by(LearningCycle.created_at.desc())
+                .limit(20)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    prompt_versions = (
+        (
+            await db.execute(
+                select(PromptVersion)
+                .where(PromptVersion.project_id == project_id)
+                .order_by(PromptVersion.created_at.desc())
+                .limit(30)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    memory_count = await db.scalar(
+        select(func.count(BookMemory.id)).where(BookMemory.project_id == project_id)
+    )
+    # Governance status currently lives alongside the memory payload so legacy
+    # databases do not need a destructive migration.  Load the complete set to
+    # compute truthful active/inactive totals, while keeping the response list
+    # bounded below.
+    all_memories = (
+        (
+            await db.execute(
+                select(BookMemory)
+                .where(BookMemory.project_id == project_id)
+                .order_by(BookMemory.updated_at.desc(), BookMemory.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    memories = all_memories[:100]
+    memory_status_counts: dict[str, int] = {
+        "active": 0,
+        "rejected": 0,
+        "rolled_back": 0,
+    }
+    for memory in all_memories:
+        status = memory_governance(memory)["status"]
+        normalized_status = "active" if status in {"active", "approved"} else status
+        memory_status_counts[normalized_status] = (
+            memory_status_counts.get(normalized_status, 0) + 1
+        )
+    pending_feedback_count = await db.scalar(
+        select(func.count(HumanFeedbackEvent.id)).where(
+            HumanFeedbackEvent.project_id == project_id,
+            HumanFeedbackEvent.learning_status == "pending",
+        )
+    )
 
     return EvolutionView(
         project_id=str(project_id),
@@ -103,7 +185,160 @@ async def get_evolution(
         skill_tests=skill_tests,
         reflections_count=len(reflections),
         latest_suggestions=suggestions,
+        quality_report=report,
+        learning_cycles=[
+            {
+                "id": str(cycle.id),
+                "status": cycle.status,
+                "source_from": cycle.source_from.isoformat() if cycle.source_from else None,
+                "source_to": cycle.source_to.isoformat() if cycle.source_to else None,
+                "feedback_count": cycle.feedback_count,
+                "assessment_count": cycle.assessment_count,
+                "memory_count": len(cycle.candidate_memory_ids or []),
+                "prompt_candidate_count": len(cycle.candidate_prompt_version_ids or []),
+                "candidate_memory_ids": cycle.candidate_memory_ids or [],
+                "candidate_prompt_version_ids": cycle.candidate_prompt_version_ids or [],
+                "promotion_decision": cycle.promotion_decision,
+                "holdout_metrics": cycle.holdout_metrics,
+                "rollback_reason": cycle.rollback_reason,
+                "error": cycle.error,
+                "started_at": cycle.started_at.isoformat() if cycle.started_at else None,
+                "completed_at": cycle.completed_at.isoformat() if cycle.completed_at else None,
+                "created_at": cycle.created_at.isoformat() if cycle.created_at else None,
+            }
+            for cycle in cycles
+        ],
+        prompt_versions=[_prompt_version_out(version) for version in prompt_versions],
+        recent_reflections=[
+            {
+                "id": str(reflection.id),
+                "reflection_type": reflection.reflection_type,
+                "chapter_no": reflection.chapter_no,
+                "content": reflection.content,
+                "decisions": reflection.decisions,
+                "lessons_learned": reflection.lessons_learned,
+                "created_at": reflection.created_at.isoformat() if reflection.created_at else None,
+            }
+            for reflection in reflections[:20]
+        ],
+        memory_entries=[
+            {
+                "id": str(memory.id),
+                "project_id": str(memory.project_id),
+                "memory_type": memory.memory_type,
+                "key": memory.key,
+                "value": visible_memory_value(memory),
+                "source": memory.source,
+                "confidence": memory.confidence,
+                "status": memory_governance(memory)["status"],
+                "governance": memory_governance(memory),
+                "created_at": memory.created_at.isoformat() if memory.created_at else None,
+                "updated_at": memory.updated_at.isoformat() if memory.updated_at else None,
+            }
+            for memory in memories
+        ],
+        memory_count=int(memory_count or 0),
+        memory_status_counts=memory_status_counts,
+        pending_feedback_count=int(pending_feedback_count or 0),
     )
+
+
+def _prompt_version_out(version: PromptVersion) -> dict[str, Any]:
+    metrics = version.evaluation_metrics or {}
+    return {
+        "id": str(version.id),
+        "agent_role": version.agent_role,
+        "version_no": version.version_no,
+        "status": version.status,
+        "template": version.template,
+        "parent_version_id": str(version.parent_version_id) if version.parent_version_id else None,
+        "learning_cycle_id": str(version.learning_cycle_id) if version.learning_cycle_id else None,
+        "evaluation_metrics": metrics,
+        "source": {
+            "type": "autonomous_learning" if version.learning_cycle_id else "manual",
+            "learning_cycle_id": (
+                str(version.learning_cycle_id) if version.learning_cycle_id else None
+            ),
+            "evidence_count": metrics.get("evidence_count"),
+            "baseline_champion_id": metrics.get("baseline_champion_id"),
+        },
+        "activated_at": version.activated_at.isoformat() if version.activated_at else None,
+        "retired_at": version.retired_at.isoformat() if version.retired_at else None,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+    }
+
+
+@router.post("/{project_id}/prompt-versions/{version_id}/holdout")
+@router.post(
+    "/{project_id}/prompt-versions/{version_id}/evaluate-holdout",
+    include_in_schema=False,
+)
+async def evaluate_prompt_version_holdout(
+    project_id: uuid.UUID,
+    version_id: uuid.UUID,
+    payload: Optional[HoldoutEvaluationRequest] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Run real fixed-suite generation/judging only after an explicit POST."""
+    service = PromptEvolutionService(db, project_id)
+    try:
+        metrics = await service.evaluate_holdout(
+            version_id,
+            force=bool(payload.force) if payload else False,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": metrics.get("holdout_status") in {"passed", "failed"},
+        "version_id": str(version_id),
+        "holdout_status": metrics.get("holdout_status"),
+        "gate_passed": metrics.get("gate_passed", False),
+        "metrics": metrics,
+    }
+
+
+@router.post("/{project_id}/prompt-versions/{version_id}/promote")
+async def promote_prompt_version(
+    project_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Promote only a candidate whose holdout explicitly passed all gates."""
+    service = PromptEvolutionService(db, project_id)
+    try:
+        version, previous = await service.promote(version_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "version": _prompt_version_out(version),
+        "previous_champion_id": (
+            str(previous.id) if previous is not None and previous.id != version.id else None
+        ),
+    }
+
+
+@router.post("/{project_id}/prompt-versions/{version_id}/rollback")
+async def rollback_prompt_version(
+    project_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Roll back and atomically restore the preceding qualified champion."""
+    service = PromptEvolutionService(db, project_id)
+    try:
+        version, restored = await service.rollback(version_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "version": _prompt_version_out(version),
+        "restored_champion": _prompt_version_out(restored) if restored else None,
+    }
 
 
 @router.post("/{project_id}/prompt-experiment")
@@ -145,6 +380,10 @@ async def get_learning_report(
     project_id: uuid.UUID,
     start_chapter: Optional[int] = Query(None, description="起始章节号"),
     end_chapter: Optional[int] = Query(None, description="结束章节号"),
+    enhance_with_llm: bool = Query(
+        False,
+        description="显式启用模型增强建议；默认关闭以避免只读页面产生模型费用",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """获取学习报告。
@@ -159,6 +398,7 @@ async def get_learning_report(
     report = await lab.generate_report(
         project_id=project_id,
         chapter_range=chapter_range,
+        enhance_with_llm=enhance_with_llm,
     )
     return LearningReportResponse(**report)
 

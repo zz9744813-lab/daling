@@ -1,7 +1,8 @@
 """测试 Rewriter 失败处理 — 空结果不删除旧版本。"""
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from app.domain.errors import AgentExecutionError, EmptyResultError
 
 

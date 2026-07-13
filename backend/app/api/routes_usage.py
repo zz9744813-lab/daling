@@ -5,6 +5,7 @@
 - GET /{project_id}/daily    — 按天统计明细
 - GET /{project_id}/by-agent — 按 Agent 分组统计
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,7 +15,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -207,7 +208,8 @@ async def _aggregate_from_agent_runs(
     end_date: date,
 ) -> list[DailyStat]:
     """从 AgentRun 按天聚合用量统计。"""
-    from datetime import datetime, timezone as tz
+    from datetime import datetime
+    from datetime import timezone as tz
 
     start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=tz.utc)
     end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=tz.utc)
@@ -247,19 +249,24 @@ async def _aggregate_from_agent_runs(
     current = start_date
     while current <= end_date:
         day_key = current.isoformat()
-        data = daily_map.get(day_key, {
-            "total_requests": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cost": 0.0,
-        })
-        stats.append(DailyStat(
-            stat_date=day_key,
-            total_requests=data["total_requests"],
-            input_tokens=data["input_tokens"],
-            output_tokens=data["output_tokens"],
-            cost=round(data["cost"], 4),
-        ))
+        data = daily_map.get(
+            day_key,
+            {
+                "total_requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost": 0.0,
+            },
+        )
+        stats.append(
+            DailyStat(
+                stat_date=day_key,
+                total_requests=data["total_requests"],
+                input_tokens=data["input_tokens"],
+                output_tokens=data["output_tokens"],
+                cost=round(data["cost"], 4),
+            )
+        )
         current += timedelta(days=1)
 
     return stats
@@ -272,18 +279,16 @@ async def _query_agent_stats(
     end_date: date,
 ) -> list[AgentStat]:
     """按 Agent 分组统计用量。"""
-    from datetime import datetime, timezone as tz
+    from datetime import datetime
+    from datetime import timezone as tz
 
     start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=tz.utc)
     end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=tz.utc)
 
-    stmt = (
-        select(AgentRun)
-        .where(
-            AgentRun.project_id == project_id,
-            AgentRun.created_at >= start_dt,
-            AgentRun.created_at < end_dt,
-        )
+    stmt = select(AgentRun).where(
+        AgentRun.project_id == project_id,
+        AgentRun.created_at >= start_dt,
+        AgentRun.created_at < end_dt,
     )
     result = await db.execute(stmt)
     runs = result.scalars().all()
@@ -317,15 +322,17 @@ async def _query_agent_stats(
     for name, data in sorted(agent_map.items(), key=lambda x: x[1]["cost"], reverse=True):
         durations = data["durations"]
         avg_duration = sum(durations) / len(durations) if durations else None
-        stats.append(AgentStat(
-            agent_name=name,
-            total_runs=data["total_runs"],
-            success_count=data["success_count"],
-            failed_count=data["failed_count"],
-            input_tokens=data["input_tokens"],
-            output_tokens=data["output_tokens"],
-            cost=round(data["cost"], 4),
-            avg_duration_ms=round(avg_duration, 1) if avg_duration else None,
-        ))
+        stats.append(
+            AgentStat(
+                agent_name=name,
+                total_runs=data["total_runs"],
+                success_count=data["success_count"],
+                failed_count=data["failed_count"],
+                input_tokens=data["input_tokens"],
+                output_tokens=data["output_tokens"],
+                cost=round(data["cost"], 4),
+                avg_duration_ms=round(avg_duration, 1) if avg_duration else None,
+            )
+        )
 
     return stats

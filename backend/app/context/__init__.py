@@ -9,6 +9,7 @@
     ContinuityResult    - 校验结果数据结构
     BookMemoryManager   - 作品记忆管理
 """
+
 from app.context.book_memory_manager import BookMemoryManager
 from app.context.canon_manager import CanonConflictError, CanonManager
 from app.context.compiler import CompiledContext, ContextCompiler

@@ -1,10 +1,12 @@
 """日志配置 - 优先使用 rich 的 RichHandler，不可用时回退到标准 logging。"""
+
 from __future__ import annotations
 
 import logging
 
 try:
     from rich.logging import RichHandler
+
     _RICH_AVAILABLE = True
 except ImportError:
     _RICH_AVAILABLE = False

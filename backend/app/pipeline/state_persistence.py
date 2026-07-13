@@ -5,6 +5,7 @@
 2. 加载章节上下文（前章摘要、角色状态、伏笔状态等）
 3. 创建审批队列条目
 """
+
 from __future__ import annotations
 
 import logging
@@ -79,9 +80,7 @@ class StatePersistence:
         version_no = await self._next_version_no(chapter_id)
 
         # 3. 合并全文内容
-        full_content = "\n\n".join(
-            b.get("content", "") for b in blocks
-        )
+        full_content = "\n\n".join(b.get("content", "") for b in blocks)
         word_count = summary_data.get("word_count", len(full_content))
 
         # 4. 创建 ChapterVersion
@@ -131,7 +130,9 @@ class StatePersistence:
         await self.db.flush()
         logger.info(
             "章节状态已保存: chapter_no=%d version_no=%d words=%d",
-            chapter.chapter_no, version_no, word_count,
+            chapter.chapter_no,
+            version_no,
+            word_count,
         )
         return version
 

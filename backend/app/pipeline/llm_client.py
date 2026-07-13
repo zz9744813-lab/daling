@@ -6,6 +6,7 @@
 如果 API key 为空，所有方法返回合理默认值（不发起网络请求），
 使整个系统在无 LLM 环境下也能运行（返回占位内容）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -61,19 +62,12 @@ class LLMClient:
         # 如果未显式传入，从 settings 推断
         if not self.base_url:
             self.base_url = (
-                settings.OPENAI_COMPATIBLE_BASE_URL
-                or settings.DEFAULT_BASE_URL
+                settings.OPENAI_COMPATIBLE_BASE_URL or settings.DEFAULT_BASE_URL
             ).rstrip("/")
         if not self.api_key:
-            self.api_key = (
-                settings.OPENAI_COMPATIBLE_API_KEY
-                or settings.DEFAULT_API_KEY
-            )
+            self.api_key = settings.OPENAI_COMPATIBLE_API_KEY or settings.DEFAULT_API_KEY
         if not self.model:
-            self.model = (
-                settings.OPENAI_COMPATIBLE_MODEL
-                or settings.DEFAULT_MODEL
-            )
+            self.model = settings.OPENAI_COMPATIBLE_MODEL or settings.DEFAULT_MODEL
 
     # ------------------------------------------------------------------
     # 属性

@@ -3,12 +3,13 @@
 采用 SPO（subject-predicate-object）三元组结构存储可演进的世界设定事实，
 支持置信度、可变性、被取代链与标签。
 """
+
 from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base

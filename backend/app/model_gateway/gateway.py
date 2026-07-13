@@ -7,15 +7,17 @@
     gateway = Gateway()
     response = await gateway.complete(request, provider_config)
 """
+
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, AsyncGenerator, Optional
 
 from app.core.config import settings
 from app.model_gateway.base import (
     BaseProvider,
-    LLMMessage,
     LLMRequest,
     LLMResponse,
 )
@@ -73,7 +75,17 @@ class Gateway:
             ValueError: 不支持的 provider_type。
         """
         # 构建缓存键（相同配置复用实例）
-        cache_key = f"{provider_type}:{base_url}:{model}"
+        # Credentials are part of provider identity.  Use a one-way fingerprint
+        # so rotating a key cannot accidentally reuse an instance holding the
+        # old key, while never placing the secret itself in logs/cache keys.
+        key_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+        transport_fingerprint = hashlib.sha256(
+            json.dumps(kwargs, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+        cache_key = (
+            f"{provider_type}:{base_url}:{model}:{key_fingerprint}:"
+            f"{transport_fingerprint}"
+        )
         if cache_key in self._providers:
             return self._providers[cache_key]
 
@@ -109,11 +121,17 @@ class Gateway:
                 "model": "gpt-4o"
             }
         """
+        transport_options: dict[str, Any] = {}
+        if provider_config.get("timeout") is not None:
+            transport_options["timeout"] = float(provider_config["timeout"])
+        if provider_config.get("max_retries") is not None:
+            transport_options["max_retries"] = int(provider_config["max_retries"])
         return self.get_provider(
             provider_type=provider_config.get("provider_type", settings.DEFAULT_PROVIDER),
             base_url=provider_config.get("base_url", ""),
             api_key=provider_config.get("api_key", ""),
             model=provider_config.get("model", ""),
+            **transport_options,
         )
 
     # ------------------------------------------------------------------

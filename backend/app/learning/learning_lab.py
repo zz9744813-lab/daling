@@ -5,6 +5,7 @@
 2. 创建规划反思记录（PlanningReflection）
 3. 列出反思记录
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,9 +15,10 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.context.book_memory_manager import memory_is_active, visible_memory_value
+from app.db.models.chapter import Chapter
 from app.db.models.memory import BookMemory, PlanningReflection
-from app.db.models.session import AgentRun
-from app.db.models.summary import ChapterSummary
+from app.db.models.quality import QualityAssessment, QualityIssue
 from app.pipeline.llm_client import LLMClient, get_llm_client
 
 logger = logging.getLogger("app.learning.learning_lab")
@@ -54,6 +56,8 @@ class LearningLab:
         self,
         project_id: Optional[uuid.UUID] = None,
         chapter_range: Optional[tuple[int, int]] = None,
+        *,
+        enhance_with_llm: bool = False,
     ) -> dict[str, Any]:
         """生成学习报告。
 
@@ -85,7 +89,11 @@ class LearningLab:
 
         # 4. 生成改进建议
         suggestions = await self._generate_suggestions(
-            pid, score_trend, common_issues, lessons_learned
+            pid,
+            score_trend,
+            common_issues,
+            lessons_learned,
+            enhance_with_llm=enhance_with_llm,
         )
 
         period = {}
@@ -105,8 +113,10 @@ class LearningLab:
 
         logger.info(
             "学习报告已生成: %d 章分数趋势, %d 问题模式, %d 经验教训, %d 建议",
-            len(score_trend), len(common_issues),
-            len(lessons_learned), len(suggestions),
+            len(score_trend),
+            len(common_issues),
+            len(lessons_learned),
+            len(suggestions),
         )
         return report
 
@@ -153,7 +163,8 @@ class LearningLab:
 
         logger.info(
             "创建反思记录: type=%s chapter_no=%s",
-            reflection_type, chapter_no,
+            reflection_type,
+            chapter_no,
         )
         return reflection
 
@@ -188,79 +199,78 @@ class LearningLab:
         project_id: uuid.UUID,
         chapter_range: Optional[tuple[int, int]],
     ) -> list[dict[str, Any]]:
-        """收集章节质量分数趋势。
-
-        从 AgentRun.result 中提取质量分数（agent_name 包含 "reviewer" 或 "quality"）。
-        """
+        """从结构化质量账本收集每章最终质量趋势。"""
         stmt = (
-            select(AgentRun)
+            select(QualityAssessment, Chapter.chapter_no)
+            .join(Chapter, QualityAssessment.chapter_id == Chapter.id)
             .where(
-                AgentRun.project_id == project_id,
-                AgentRun.agent_name.in_(["quality_reviewer", "reviewer", "editor"]),
-                AgentRun.status == "success",
+                QualityAssessment.project_id == project_id,
+                QualityAssessment.assessment_type.in_(["critic", "deterministic_gate"]),
             )
-            .order_by(AgentRun.created_at.asc())
+            .order_by(QualityAssessment.created_at.asc())
         )
         result = await self.db.execute(stmt)
-        runs = result.scalars().all()
-
-        trend = []
-        for run in runs:
-            r = run.result or {}
-            chapter_no = r.get("chapter_no")
-            score = r.get("score") or r.get("quality_score")
-            if chapter_no and score is not None:
-                if chapter_range and not (chapter_range[0] <= chapter_no <= chapter_range[1]):
-                    continue
-                trend.append({
-                    "chapter_no": chapter_no,
-                    "score": float(score),
-                    "issues": r.get("issues", []),
-                })
-        return trend
+        by_chapter: dict[int, dict[str, Any]] = {}
+        priorities = {"critic": 1, "deterministic_gate": 2}
+        for assessment, chapter_no in result.all():
+            if chapter_range and not (chapter_range[0] <= chapter_no <= chapter_range[1]):
+                continue
+            if assessment.overall_score is None:
+                continue
+            current = by_chapter.get(chapter_no)
+            priority = priorities.get(assessment.assessment_type, 0)
+            if current and current["_priority"] > priority:
+                continue
+            by_chapter[chapter_no] = {
+                "chapter_no": chapter_no,
+                "score": float(assessment.overall_score),
+                "passed": assessment.passed,
+                "verdict": assessment.verdict,
+                "assessment_id": str(assessment.id),
+                "_priority": priority,
+            }
+        return [
+            {key: value for key, value in item.items() if key != "_priority"}
+            for _, item in sorted(by_chapter.items())
+        ]
 
     async def _collect_common_issues(
         self,
         project_id: uuid.UUID,
         chapter_range: Optional[tuple[int, int]],
     ) -> list[dict[str, Any]]:
-        """收集常见问题模式。
-
-        从 AgentRun.result 中提取问题列表，统计频次。
-        """
+        """从结构化 issue 账本统计可追踪的问题模式。"""
         stmt = (
-            select(AgentRun)
+            select(QualityIssue, Chapter.chapter_no)
+            .join(Chapter, QualityIssue.chapter_id == Chapter.id)
             .where(
-                AgentRun.project_id == project_id,
-                AgentRun.agent_name.in_(["quality_reviewer", "reviewer", "editor", "continuity_checker"]),
-                AgentRun.status == "success",
+                QualityIssue.project_id == project_id,
             )
-            .order_by(AgentRun.created_at.desc())
-            .limit(100)
+            .order_by(QualityIssue.created_at.desc())
+            .limit(500)
         )
         result = await self.db.execute(stmt)
-        runs = result.scalars().all()
 
-        issue_counter: dict[str, int] = {}
-        for run in runs:
-            r = run.result or {}
-            chapter_no = r.get("chapter_no", 0)
+        issue_counter: dict[tuple[str, str], dict[str, Any]] = {}
+        for issue, chapter_no in result.all():
             if chapter_range and not (chapter_range[0] <= chapter_no <= chapter_range[1]):
                 continue
-            issues = r.get("issues", [])
-            if isinstance(issues, list):
-                for issue in issues:
-                    if isinstance(issue, dict):
-                        key = issue.get("type", issue.get("category", "unknown"))
-                    else:
-                        key = str(issue)
-                    issue_counter[key] = issue_counter.get(key, 0) + 1
+            key = (issue.source, issue.category)
+            entry = issue_counter.setdefault(
+                key,
+                {
+                    "issue_type": issue.category,
+                    "source": issue.source,
+                    "severity": issue.severity,
+                    "count": 0,
+                    "open_count": 0,
+                },
+            )
+            entry["count"] += 1
+            if issue.status == "open":
+                entry["open_count"] += 1
 
-        # 按频次排序
-        return [
-            {"issue_type": k, "count": v}
-            for k, v in sorted(issue_counter.items(), key=lambda x: x[1], reverse=True)
-        ]
+        return sorted(issue_counter.values(), key=lambda item: item["count"], reverse=True)
 
     async def _collect_lessons(self, project_id: uuid.UUID) -> list[dict[str, Any]]:
         """提取经验教训（从 BookMemory 和 PlanningReflection）。"""
@@ -273,12 +283,18 @@ class LearningLab:
         )
         result = await self.db.execute(stmt)
         for mem in result.scalars().all():
-            lessons.append({
-                "source": "book_memory",
-                "key": mem.key,
-                "value": mem.value,
-                "confidence": mem.confidence,
-            })
+            # Rejected and rolled-back lessons remain visible in the audit
+            # registry, but must not be reported as current learned guidance.
+            if not memory_is_active(mem):
+                continue
+            lessons.append(
+                {
+                    "source": "book_memory",
+                    "key": mem.key,
+                    "value": visible_memory_value(mem),
+                    "confidence": mem.confidence,
+                }
+            )
 
         # 从 PlanningReflection 提取
         stmt = (
@@ -291,19 +307,23 @@ class LearningLab:
         for ref in result.scalars().all():
             for lesson in ref.lessons_learned or []:
                 if isinstance(lesson, str):
-                    lessons.append({
-                        "source": "reflection",
-                        "reflection_type": ref.reflection_type,
-                        "chapter_no": ref.chapter_no,
-                        "value": lesson,
-                    })
+                    lessons.append(
+                        {
+                            "source": "reflection",
+                            "reflection_type": ref.reflection_type,
+                            "chapter_no": ref.chapter_no,
+                            "value": lesson,
+                        }
+                    )
                 elif isinstance(lesson, dict):
-                    lessons.append({
-                        "source": "reflection",
-                        "reflection_type": ref.reflection_type,
-                        "chapter_no": ref.chapter_no,
-                        **lesson,
-                    })
+                    lessons.append(
+                        {
+                            "source": "reflection",
+                            "reflection_type": ref.reflection_type,
+                            "chapter_no": ref.chapter_no,
+                            **lesson,
+                        }
+                    )
 
         return lessons
 
@@ -313,6 +333,8 @@ class LearningLab:
         score_trend: list[dict[str, Any]],
         common_issues: list[dict[str, Any]],
         lessons_learned: list[dict[str, Any]],
+        *,
+        enhance_with_llm: bool = False,
     ) -> list[str]:
         """生成改进建议。
 
@@ -347,7 +369,7 @@ class LearningLab:
             suggestions.append("尚无积累的经验教训，建议在每章完成后创建反思记录")
 
         # LLM 增强建议
-        if self.llm.is_configured and (score_trend or common_issues):
+        if enhance_with_llm and self.llm.is_configured and (score_trend or common_issues):
             llm_suggestions = await self._llm_suggestions(
                 score_trend, common_issues, lessons_learned
             )
@@ -370,19 +392,15 @@ class LearningLab:
 
         prompt_parts = []
         if score_trend:
-            scores_str = ", ".join(
-                f"第{s['chapter_no']}章:{s['score']}" for s in score_trend[-10:]
-            )
+            scores_str = ", ".join(f"第{s['chapter_no']}章:{s['score']}" for s in score_trend[-10:])
             prompt_parts.append(f"质量分数趋势: {scores_str}")
         if common_issues:
-            issues_str = "; ".join(
-                f"{i['issue_type']}({i['count']}次)" for i in common_issues[:5]
-            )
+            issues_str = "; ".join(f"{i['issue_type']}({i['count']}次)" for i in common_issues[:5])
             prompt_parts.append(f"常见问题: {issues_str}")
         if lessons_learned:
             lessons_str = "; ".join(
-                str(l.get("value", l.get("key", "")))[:50]
-                for l in lessons_learned[:5]
+                str(lesson.get("value", lesson.get("key", "")))[:50]
+                for lesson in lessons_learned[:5]
             )
             prompt_parts.append(f"已有经验教训: {lessons_str}")
 

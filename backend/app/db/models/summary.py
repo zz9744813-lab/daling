@@ -3,12 +3,13 @@
 chapter_summaries 含 v5.0 扩展字段：
 entities_involved / facts_asserted / facts_referenced。
 """
+
 from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -19,6 +20,9 @@ class ChapterSummary(TimestampMixin, Base):
     """ChapterSummary - 章节摘要 + v5.0 实体/事实追踪字段。"""
 
     __tablename__ = "chapter_summaries"
+    __table_args__ = (
+        UniqueConstraint("project_id", "chapter_no", name="uq_chapter_summary_project_no"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(

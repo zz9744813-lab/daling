@@ -1,10 +1,11 @@
 """世界设定模型 - world_bibles。"""
+
 from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -29,4 +30,7 @@ class WorldBible(TimestampMixin, Base):
     created_by_agent: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     def __repr__(self) -> str:
-        return f"<WorldBible(project_id={self.project_id}, version={self.version}, status='{self.status}')>"
+        return (
+            f"<WorldBible(project_id={self.project_id}, version={self.version}, "
+            f"status='{self.status}')>"
+        )

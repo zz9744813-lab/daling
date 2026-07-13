@@ -3,6 +3,7 @@
 提供 OpenAI 兼容 API 的异步调用、JSON 响应解析与 token 估算。
 当 API key 未配置时，所有需要 LLM 的方法返回 None / 空结果（不报错）。
 """
+
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ logger = logging.getLogger("app.context.llm")
 # LLM 配置检查
 # ---------------------------------------------------------------------------
 
+
 def is_llm_configured() -> bool:
     """检查 LLM 是否已配置（base_url / api_key / model 均非空）。"""
     return bool(
@@ -33,6 +35,7 @@ def is_llm_configured() -> bool:
 # ---------------------------------------------------------------------------
 # LLM 调用
 # ---------------------------------------------------------------------------
+
 
 async def call_llm(
     messages: list[dict[str, str]],
@@ -77,6 +80,7 @@ async def call_llm(
 # JSON 解析
 # ---------------------------------------------------------------------------
 
+
 def parse_json_response(text: str | None) -> Any:
     """解析 LLM 返回的 JSON，处理 markdown code block 与前后多余文本。
 
@@ -116,15 +120,16 @@ def parse_json_response(text: str | None) -> Any:
 # Token 估算与截断
 # ---------------------------------------------------------------------------
 
+
 def _is_cjk_char(ch: str) -> bool:
     """判断字符是否为 CJK / 日韩字符。"""
     code = ord(ch)
     return (
-        0x4E00 <= code <= 0x9FFF       # CJK 统一表意文字
-        or 0x3400 <= code <= 0x4DBF    # CJK 扩展 A
-        or 0x3040 <= code <= 0x30FF    # 平假名 + 片假名
-        or 0xAC00 <= code <= 0xD7AF    # 韩文音节
-        or 0xFF00 <= code <= 0xFFEF    # 全角字符
+        0x4E00 <= code <= 0x9FFF  # CJK 统一表意文字
+        or 0x3400 <= code <= 0x4DBF  # CJK 扩展 A
+        or 0x3040 <= code <= 0x30FF  # 平假名 + 片假名
+        or 0xAC00 <= code <= 0xD7AF  # 韩文音节
+        or 0xFF00 <= code <= 0xFFEF  # 全角字符
     )
 
 

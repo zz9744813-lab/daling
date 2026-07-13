@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 
 class AgentExecutionError(Exception):
     """Agent 执行失败的基类。

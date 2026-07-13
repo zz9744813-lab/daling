@@ -5,6 +5,7 @@
 - lifespan: 启动时初始化日志 / Redis / 数据库建表；关闭时释放连接
 - /health 健康检查端点
 """
+
 from __future__ import annotations
 
 import logging
@@ -35,6 +36,7 @@ from app.core.config import settings
 from app.core.database import dispose_db, init_db
 from app.core.logging import setup_logging
 from app.core.redis import close_redis, init_redis, is_redis_available
+from app.services.continuous_production import continuous_production_service
 
 logger = logging.getLogger("app.main")
 
@@ -52,13 +54,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         await init_db()
         logger.info("数据库表已就绪")
+        reconciled = await continuous_production_service.reconcile_persisted_quality_state()
+        if any(reconciled.values()):
+            logger.info("已完成质量账本启动对账: %s", reconciled)
+        recovered = await continuous_production_service.restore_active_runs()
+        continuous_production_service.start_recovery_watchdog()
+        if recovered:
+            logger.info("已恢复 %d 个 24h 自动写作任务", recovered)
     except Exception as exc:  # noqa: BLE001
         logger.error("数据库初始化失败: %s", exc)
+        raise
 
     yield
 
     # 关闭
     logger.info("关闭 Novel Agent OS 后端...")
+    await continuous_production_service.shutdown()
     await close_redis()
     err = await dispose_db()
     if err is not None:
@@ -84,6 +95,9 @@ def create_app() -> FastAPI:
     )
 
     # ---- 注册路由 ----
+    # chat-create 的静态 GET 路由必须早于 /api/projects/{project_id}，
+    # 否则 Starlette 会先命中动态项目路由并把 "chat-create" 当作 UUID。
+    app.include_router(chat_create_router)
     app.include_router(projects_router)
     app.include_router(pipeline_router)
     app.include_router(cockpit_router)
@@ -97,7 +111,6 @@ def create_app() -> FastAPI:
     app.include_router(book_memory_router)
     app.include_router(planning_router)
     app.include_router(continuous_router)
-    app.include_router(chat_create_router)
 
     # ---- 健康检查 ----
     @app.get("/health", tags=["system"])

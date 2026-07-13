@@ -1,10 +1,11 @@
 """Provider 模型 - llm_providers / model_bindings。"""
+
 from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import GUID, Base
@@ -19,7 +20,11 @@ class LlmProvider(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     # openai_compatible / anthropic / custom
-    provider_type: Mapped[str] = mapped_column(String(50), nullable=False, default="openai_compatible")
+    provider_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="openai_compatible",
+    )
     base_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # 存储加密后的 API Key
     api_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

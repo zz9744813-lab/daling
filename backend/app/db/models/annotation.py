@@ -1,4 +1,5 @@
 """批注模型 - annotations。"""
+
 from __future__ import annotations
 
 import uuid
@@ -35,4 +36,6 @@ class Annotation(TimestampMixin, Base):
     resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     def __repr__(self) -> str:
-        return f"<Annotation(author='{self.author}', type='{self.type}', severity='{self.severity}')>"
+        return (
+            f"<Annotation(author='{self.author}', type='{self.type}', severity='{self.severity}')>"
+        )

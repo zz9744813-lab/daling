@@ -3,7 +3,7 @@
 使用 pytest-asyncio 的 asyncio mode。
 所有测试通过 mock LLM 调用来验证 Agent 的错误处理行为。
 """
-import asyncio
+
 
 # 设置 asyncio mode
 def pytest_configure(config):

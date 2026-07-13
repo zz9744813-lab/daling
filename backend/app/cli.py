@@ -2,6 +2,7 @@
 
 提供开发常用的便捷子命令，例如启动服务、初始化数据库等。
 """
+
 from __future__ import annotations
 
 import asyncio
