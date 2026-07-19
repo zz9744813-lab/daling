@@ -1,0 +1,11 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+blob-report/
+.e2e-state/
+e2e-logs/
+
+# Python cache
+__pycache__/
+*.pyc
